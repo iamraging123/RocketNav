@@ -1,0 +1,2821 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RocketNav Viewer</title>
+<!--
+  RocketNav ground station - single self-contained file, no external
+  libraries. The satellite map is the ONE network user (Esri World Imagery
+  tiles) and it is optional: offline, a labeled grid shows instead while
+  every other panel keeps working. Open by double-clicking in
+  Chrome/Edge (Web Serial needs a Chromium browser and a top-level page -
+  do not embed this file in an iframe or sandboxed host).
+  Built against SCHEMA.md v1 / telemetry.cpp: records "hdr", "org", "st",
+  "msg", "cal".
+  Layout is field-first: huge glanceable flight numbers, attitude + map
+  always visible, everything else behind tabs. Dark and light (sunlight)
+  themes; canvases read their palette from the CSS tokens via PAL.
+-->
+<style>
+  :root {
+    --bg: #0B0B0B; --panel: #121212; --panel2: #0D0D0D;
+    --edge: #262626; --line: #262626; --grid: #1C1C1C;
+    --text: #E9E9E9; --dim: #9C9C9C; --dim2: #6B6B6B;
+    --bad: #FF4A3D;
+    --good: #E9E9E9; --warn: #E9E9E9; --accent: #E9E9E9;
+    --c1: #FF5252; --c2: #4DD35E; --c3: #4D8DFF; --c4: #FFB129;
+    --mark: #E9E9E9;
+    --mono: Consolas, "Cascadia Code", "Courier New", monospace;
+  }
+  html[data-theme="light"] {
+    --bg: #F1F1EF; --panel: #FBFBFA; --panel2: #F3F3F1;
+    --edge: #D2D2CD; --line: #D2D2CD; --grid: #E4E4E0;
+    --text: #141414; --dim: #6E6E6E; --dim2: #979797;
+    --bad: #C22217;
+    --good: #141414; --warn: #141414; --accent: #141414;
+    --c1: #C62828; --c2: #1B7A2F; --c3: #1D5FD6; --c4: #915B00;
+    --mark: #141414;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 12px/1.4 var(--mono);
+    padding: 6px; min-height: 100vh;
+  }
+  .spacer { flex: 1; }
+  h2 {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.09em;
+    color: var(--dim); margin-bottom: 5px; font-weight: 600;
+  }
+  .bar {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    background: var(--panel); border: 1px solid var(--edge);
+    padding: 4px 8px; margin-bottom: 6px;
+  }
+  button {
+    background: var(--text); border: 1px solid var(--text); color: var(--bg);
+    font-family: var(--mono); font-weight: 600; padding: 3px 10px;
+    cursor: pointer; font-size: 12px;
+  }
+  button.secondary { background: var(--panel2); color: var(--text);
+    border: 1px solid var(--edge); }
+  button.secondary:hover:not(:disabled) { border-color: var(--dim); }
+  button.secondary.armred,
+  button.secondary.armred:hover:not(:disabled) {
+    border-color: var(--bad); color: var(--bad); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.mini { padding: 1px 7px; font-size: 11px; }
+  button:focus-visible { outline: 2px solid var(--dim); outline-offset: 2px; }
+  .dot { width: 10px; height: 10px;
+    background: var(--bad); display: inline-block; }
+  .dot.on { background: var(--text); }
+  .badge {
+    background: var(--panel2); border: 1px solid var(--edge);
+    padding: 1px 6px; font-family: var(--mono);
+    font-size: 10.5px; color: var(--dim); white-space: nowrap;
+  }
+  .badge b { color: var(--text); font-weight: 600; }
+  .lmode { display: inline-flex; border: 1px solid var(--edge); }
+  .lmode button { background: var(--bg); color: var(--dim); border: 0;
+    font: inherit; font-size: 11px; padding: 3px 9px; cursor: pointer;
+    letter-spacing: .04em; }
+  .lmode button.on { background: var(--text); color: var(--bg); }
+  .badge.bad, .badge.bad b { color: var(--bad); border-color: var(--bad); }
+  .badge.sim { border-color: var(--bad); color: var(--bad); }
+  input[type=range] { flex: 1; min-width: 120px; accent-color: var(--dim); }
+  input[type=range]:disabled { opacity: 0.35; }
+
+  #staleBar {
+    display: none; background: var(--bad); color: #000; font-weight: 700;
+    letter-spacing: .12em; text-transform: uppercase; text-align: center;
+    padding: 4px; margin-bottom: 6px; font-size: 12px;
+  }
+
+  /* ---------- readout cards ---------- */
+  .readouts {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
+    gap: 6px; margin-bottom: 6px;
+  }
+  .ro {
+    background: var(--panel); border: 1px solid var(--edge);
+    padding: 4px 8px 5px; min-width: 0;
+  }
+  .ro .l { font-size: 9px; text-transform: uppercase; color: var(--dim);
+    letter-spacing: 0.06em; white-space: nowrap; }
+  .ro .v { font-family: var(--mono); font-size: 15px; margin-top: 1px;
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  .ro .v.small { font-size: 11.5px; line-height: 1.5; }
+  .ro .s { font-family: var(--mono); font-size: 9.5px; color: var(--dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    min-height: 12px; }
+  body.stale .ro .v { color: var(--dim); }
+
+  /* ---------- tabs ---------- */
+  #tabs {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
+    border-bottom: 1px solid var(--edge); margin-bottom: 6px; padding: 0 4px;
+  }
+  .tab {
+    background: none; border: none; border-bottom: 2px solid transparent;
+    color: var(--dim); font-size: 12px; font-weight: 600;
+    padding: 4px 10px 3px; cursor: pointer;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.on { color: var(--text); border-bottom-color: var(--text); }
+  .page { display: none; }
+  .page.on { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+
+  /* ---------- layout ---------- */
+  .duo {
+    display: grid; grid-template-columns: minmax(340px, 5fr) minmax(340px, 6fr);
+    gap: 6px; margin-bottom: 6px;
+  }
+  #split {
+    display: grid; grid-template-columns: minmax(370px, 2fr) 3fr;
+    gap: 6px; min-height: calc(100vh - 112px);
+  }
+  @media (max-width: 1350px) {
+    #split { grid-template-columns: minmax(330px, 1fr) 2fr; }
+  }
+  @media (max-width: 1020px) { #split { grid-template-columns: 1fr; } }
+  #leftcol { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  #leftcol > .panel {
+    flex: 1 1 0; display: flex; flex-direction: column; min-height: 0;
+  }
+  #leftcol > .panel:last-child { flex: 1.25 1 0; }
+  #leftcol h2, #leftcol .modelbar, #leftcol .maprow, #leftcol table,
+  #leftcol #compass { flex: 0 0 auto; }
+  #rightcol { min-width: 0; display: flex; flex-direction: column; }
+  @media (max-width: 980px) { .duo { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel); border: 1px solid var(--edge);
+    padding: 6px 8px; min-width: 0;
+  }
+  canvas { width: 100%; display: block; background: var(--panel2); }
+  #rocket3d { flex: 1 1 0; height: auto; min-height: 170px;
+    touch-action: none; cursor: grab; }
+  #compass { height: 38px; margin-top: 6px; }
+  #map { flex: 1 1 0; height: auto; min-height: 210px; touch-action: none;
+    cursor: grab; background: #0a0d12; }
+  .modelbar { display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+    margin-bottom: 6px; }
+  .maprow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    margin-top: 6px; }
+  .coords { font-family: var(--mono); font-size: 12px; }
+  .triplet { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px;
+    background: var(--edge); border: 1px solid var(--edge); margin-top: 6px; }
+  .triplet div { background: var(--panel); padding: 2px 8px 3px; }
+  .triplet span { font-size: 9px; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--dim); display: block; }
+  .triplet b { font-family: var(--mono); font-size: 13.5px; font-weight: 600;
+    font-variant-numeric: tabular-nums; }
+
+  .charts {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-auto-rows: minmax(88px, 1fr); align-items: stretch;
+    flex: 1 1 auto; gap: 6px; margin-bottom: 6px;
+  }
+  #pg-comms .charts { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  @media (max-width: 900px) {
+    .charts, #pg-comms .charts {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  .chart { height: 100%; min-height: 88px; contain: size;
+    background: var(--panel2); border: 1px solid var(--edge); }
+  .chart.tall { grid-column: 1 / -1; min-height: 110px; }
+  .tables { columns: 254px; column-gap: 6px; margin-bottom: 6px; }
+  .tables > .panel {
+    break-inside: avoid; margin: 0 0 6px; display: block;
+  }
+
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono);
+    font-size: 11px; }
+  td { padding: 1px 4px; vertical-align: top; }
+  td.k { color: var(--dim); white-space: nowrap; font-size: 11px; }
+  td.r { text-align: right; white-space: normal;
+    overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+  .chip { font-size: 9.5px; font-family: var(--mono); padding: 0 5px;
+    border: 1px solid var(--edge); color: var(--dim); }
+  .chip.ok { color: var(--text); border-color: var(--dim); }
+  .chip.warn { color: var(--bg); background: var(--text);
+    border-color: var(--text); font-weight: 600; }
+  .chip.bad { color: var(--bad); border-color: var(--bad); }
+
+  .ctlrow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+    margin-bottom: 6px; }
+  .ctlrow .k2 { color: var(--dim); font-size: 11px; min-width: 92px; }
+  .ctlrow input[type="number"] { background: var(--bg); color: var(--text);
+    border: 1px solid var(--edge); font-family: var(--mono); font-size: 12px;
+    padding: 2px 4px; width: 72px; }
+  .ctlrow select { background: var(--bg); color: var(--text);
+    border: 1px solid var(--edge); font-family: var(--mono); font-size: 12px;
+    padding: 2px 4px; }
+  .ctlrow input[type="range"] { width: 100%; accent-color: var(--text);
+    background: transparent; }
+  .lcpts { font-family: var(--mono); font-size: 11.5px; margin: 4px 0; }
+  .lcpts .row { display: flex; gap: 8px; align-items: center;
+    padding: 1px 0; }
+  .lcpts .row span { flex: 1; }
+  .lcpts .hdrrow { color: var(--dim); font-size: 10px;
+    text-transform: uppercase; letter-spacing: .06em; margin: 3px 0 1px; }
+  .lcpts .dim2 { color: var(--dim); }
+  #lcGraph { width: 100%; height: 130px; display: block; }
+  .ctlrow .ro { font-family: var(--mono); font-size: 12.5px; }
+  input[type=color] { width: 46px; height: 22px; padding: 0;
+    border: 1px solid var(--edge); background: var(--panel2);
+    cursor: pointer; }
+  #cmdLog { font-family: var(--mono); font-size: 10.5px; line-height: 1.5;
+    color: var(--dim); background: var(--panel2); padding: 5px 7px;
+    height: clamp(160px, 26vh, 320px); overflow: auto; white-space: pre;
+    overscroll-behavior: contain; }
+  #bootLog { font-family: var(--mono); font-size: 10px; line-height: 1.45; }
+  #bootLog .bt { color: var(--dim); margin-right: 6px; }
+  #bootLog div.err { color: var(--bad); }
+  #console {
+    font-family: var(--mono); font-size: 10.5px; color: var(--dim);
+    background: var(--panel2); padding: 6px 8px;
+    height: clamp(90px, 14vh, 150px); overflow: auto; white-space: pre;
+    overscroll-behavior: contain; cursor: pointer;
+  }
+  #pg-comms #console { height: clamp(220px, 38vh, 520px); }
+  .loghead { display: flex; align-items: center; gap: 6px; }
+  .loghead .sp { flex: 1; }
+  .conrow { display: flex; gap: 6px; align-items: center; margin-top: 5px; }
+  .conrow .cprompt { font-family: var(--mono); color: var(--dim);
+    font-size: 11px; }
+  #consoleIn { flex: 1; font-family: var(--mono); font-size: 11px;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--edge); padding: 3px 7px; outline: none; }
+  #consoleIn:focus { border-color: var(--dim); }
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <span id="conndot" class="dot"></span>
+  <span class="lmode" title="USB = rocket serial (50 Hz full stream). LoRa = ESP32-C3 base station (4 Hz bridged stream, same records)."><button id="lmUsb">USB</button><button id="lmLora">LoRa</button></span>
+  <button id="btnConnect">Connect</button>
+  <button id="btnDemo" class="secondary">Demo</button>
+  <span class="badge" id="bFw"><b>&mdash;</b> fw</span>
+  <span class="badge" id="bState">state <b>&mdash;</b></span>
+  <span class="badge" id="bMag">mode <b>&mdash;</b></span>
+  <span class="badge" id="bCtl">ctl <b>&mdash;</b></span>
+  <span class="badge" id="bLnk">link <b>&mdash;</b></span>
+  <span class="badge" id="bFhz">filter <b>&mdash;</b> Hz</span>
+  <span class="badge" id="bGrz">gnss <b>&mdash;</b> Hz</span>
+  <span class="badge" id="bRx">rx <b>&mdash;</b> Hz</span>
+  <span class="badge" id="bAge">age <b>&mdash;</b></span>
+  <span class="badge" id="bRec">recs <b>0</b></span>
+  <span class="badge" id="bDrop">drops <b>0</b></span>
+  <span class="badge" id="bErr">err <b>0</b></span>
+  <span class="badge sim" id="bSim" style="display:none">SIM DATA</span>
+  <span class="spacer"></span>
+  <button id="btnJsonl" class="secondary" disabled>Save .jsonl</button>
+  <button id="btnCsv" class="secondary" disabled>Save .csv</button>
+  <button id="btnTheme" class="secondary">Light</button>
+</div>
+
+<div id="staleBar">NO DATA &mdash; <span id="staleAge">0</span> s</div>
+
+<div class="bar">
+  <button id="btnPause" class="secondary" disabled>Pause</button>
+  <input type="range" id="scrub" min="0" max="0" value="0" disabled>
+  <span class="badge" id="bBoot">boot <b>&mdash;</b></span>
+  <span class="badge" id="scrubLbl">live</span>
+</div>
+
+<div id="split">
+  <div id="leftcol">
+    <div class="panel">
+      <h2>Attitude</h2>
+      <div class="modelbar">
+        <button id="btnStl" class="secondary mini">Load STL</button>
+        <input type="file" id="stlFile" accept=".stl" style="display:none">
+        <button id="btnBuiltin" class="secondary mini">Built-in</button>
+        <button id="btnNoseAxis" class="secondary mini" disabled>Nose &#8635;</button>
+        <button id="btnViewReset" class="secondary mini">View &#8962;</button>
+        <span class="badge" id="modelInfo">built-in</span>
+      </div>
+      <canvas id="rocket3d"></canvas>
+      <canvas id="compass"></canvas>
+      <div class="triplet">
+        <div><span>Roll</span><b id="euRoll">&mdash;</b></div>
+        <div><span>Pitch</span><b id="euPitch">&mdash;</b></div>
+        <div><span>Yaw</span><b id="euYaw">&mdash;</b></div>
+      </div>
+      <table>
+        <tr><td class="k">q [w x y z]</td><td id="aQ" class="r">&mdash;</td></tr>
+        <tr><td class="k">1&sigma; att &deg; [N E D]</td><td id="aSa" class="r">&mdash;</td></tr>
+      </table>
+    </div>
+    <div class="panel">
+      <h2>Ground track</h2>
+      <div class="modelbar">
+        <button id="btnCenter" class="secondary mini">Center: pad</button>
+        <button id="btnSetPad" class="secondary mini">Set pad</button>
+        <button id="btnPadHere" class="secondary mini">Pad = here</button>
+        <button id="btnMapIn" class="secondary mini">+</button>
+        <button id="btnMapOut" class="secondary mini">&minus;</button>
+        <span class="badge" id="mapInfo">&mdash;</span>
+        <span class="badge" id="padInfo">&mdash;</span>
+      </div>
+      <canvas id="map"></canvas>
+      <div class="maprow">
+        <span class="coords" id="mapCoords">&mdash;</span>
+        <button id="btnCopyPos" class="secondary mini" disabled>Copy</button>
+        <button id="btnGmaps" class="secondary mini" disabled>Maps</button>
+      </div>
+    </div>
+  </div>
+  <div id="rightcol">
+    <nav id="tabs">
+      <button class="tab on" data-page="main">Main</button>
+      <span class="spacer"></span>
+      <button class="tab" data-page="ctrl">Ctrl</button>
+      <button class="tab" data-page="comms">Comms</button>
+    </nav>
+
+    <section class="page on" id="pg-main">
+      <div class="readouts">
+        <div class="ro"><div class="l">Latitude</div><div class="v" id="roLat">&mdash;</div><div class="s" id="roLatS"></div></div>
+        <div class="ro"><div class="l">Longitude</div><div class="v" id="roLon">&mdash;</div><div class="s" id="roLonS"></div></div>
+        <div class="ro"><div class="l">Altitude AGL</div><div class="v" id="roAgl">&mdash;</div><div class="s" id="roAglS"></div></div>
+        <div class="ro"><div class="l">Altitude MSL</div><div class="v" id="roAlt">&mdash;</div><div class="s" id="roAltS"></div></div>
+        <div class="ro"><div class="l">Vertical rate</div><div class="v" id="roVs">&mdash;</div><div class="s" id="roVsS"></div></div>
+        <div class="ro"><div class="l">Speed</div><div class="v" id="roSpd">&mdash;</div><div class="s" id="roSpdS"></div></div>
+        <div class="ro"><div class="l">Apogee</div><div class="v" id="roApo">&mdash;</div><div class="s" id="roApoS"></div></div>
+        <div class="ro"><div class="l">From pad</div><div class="v" id="roPad">&mdash;</div><div class="s" id="roPadS"></div></div>
+        <div class="ro"><div class="l">Heading</div><div class="v" id="roYaw">&mdash;</div><div class="s" id="roYawS"></div></div>
+        <div class="ro"><div class="l">Roll / Pitch</div><div class="v" id="roRp">&mdash;</div><div class="s" id="roRpS"></div></div>
+        <div class="ro"><div class="l">Vel NED m/s</div><div class="v small" id="roVned">&mdash;</div><div class="s" id="roVnedS"></div></div>
+        <div class="ro"><div class="l">Baro bias</div><div class="v" id="roBb">&mdash;</div><div class="s"></div></div>
+      </div>
+      <div class="charts">
+        <canvas class="chart tall" id="chAlt"></canvas>
+        <canvas class="chart" id="chAtt"></canvas>
+        <canvas class="chart" id="chGyr"></canvas>
+        <canvas class="chart" id="chMag"></canvas>
+        <canvas class="chart" id="dialAcc"></canvas>
+      </div>
+      <div class="tables">
+        <div class="panel">
+          <h2>Filter</h2>
+          <table>
+            <tr><td class="k">&sigma; pos NED m</td><td id="fSp" class="r">&mdash;</td></tr>
+            <tr><td class="k">&sigma; vel NED m/s</td><td id="fSv" class="r">&mdash;</td></tr>
+            <tr><td class="k">p NED m</td><td id="fPn" class="r">&mdash;</td></tr>
+            <tr><td class="k">NIS P/V/M/B</td><td id="fNis" class="r">&mdash;</td></tr>
+            <tr><td class="k">innov pos m</td><td id="fIgp" class="r">&mdash;</td></tr>
+            <tr><td class="k">innov vel m/s</td><td id="fIgv" class="r">&mdash;</td></tr>
+            <tr><td class="k">innov mag &micro;T</td><td id="fImg" class="r">&mdash;</td></tr>
+            <tr><td class="k">innov baro m</td><td id="fIbr" class="r">&mdash;</td></tr>
+          </table>
+        </div>
+        <div class="panel">
+          <h2>Calibration</h2>
+          <table>
+            <tr><td class="k">gyro offset &deg;/s</td><td id="calBg" class="r">&mdash;</td></tr>
+            <tr><td class="k">init attitude &deg;</td><td id="calEul" class="r">&mdash;</td></tr>
+            <tr><td class="k">window</td><td id="calDur" class="r">&mdash;</td></tr>
+            <tr><td class="k">align quality</td><td id="hAlq" class="r">&mdash;</td></tr>
+          </table>
+        </div>
+        <div class="panel">
+          <h2>Origin</h2>
+          <table>
+            <tr><td class="k">anchored at</td><td id="dOrg" class="r">&mdash;</td></tr>
+            <tr><td class="k">references</td><td id="dOrg2" class="r">&mdash;</td></tr>
+          </table>
+        </div>
+        <div class="panel">
+          <h2>Sensors</h2>
+          <table>
+            <tr><td class="k">acc m/s&sup2;</td><td id="sAcc" class="r">&mdash;</td></tr>
+            <tr><td class="k">gyro &deg;/s</td><td id="sGyr" class="r">&mdash;</td></tr>
+            <tr><td class="k">mag &micro;T</td><td id="sMag" class="r">&mdash;</td></tr>
+            <tr><td class="k">mag raw &micro;T</td><td id="sMagR" class="r">&mdash;</td></tr>
+            <tr><td class="k">|B| / incl</td><td id="sMagD" class="r">&mdash;</td></tr>
+            <tr><td class="k">baro</td><td id="sBaro" class="r">&mdash;</td></tr>
+            <tr><td class="k">gyro bias &deg;/s</td><td id="sBg" class="r">&mdash;</td></tr>
+            <tr><td class="k">accel bias m/s&sup2;</td><td id="sBa" class="r">&mdash;</td></tr>
+          </table>
+        </div>
+        <div class="panel">
+          <h2>Health</h2>
+          <table>
+            <tr><td class="k">IMU</td><td id="hImu" class="chips"></td></tr>
+            <tr><td class="k">Mag</td><td id="hMag" class="chips"></td></tr>
+            <tr><td class="k">Baro</td><td id="hBar" class="chips"></td></tr>
+            <tr><td class="k">GNSS</td><td id="hGps" class="chips"></td></tr>
+            <tr><td class="k">sensor drops</td><td id="hDrops" class="r">&mdash;</td></tr>
+            <tr><td class="k">i2c err / resets</td><td id="hI2c" class="r">&mdash;</td></tr>
+          </table>
+        </div>
+        <div class="panel">
+          <h2>GNSS raw</h2>
+          <table>
+            <tr><td class="k">fix / sats</td><td id="gFix" class="r">&mdash;</td></tr>
+            <tr><td class="k">hAcc / vAcc / sAcc</td><td id="gAcc" class="r">&mdash;</td></tr>
+            <tr><td class="k">raw lat, lon</td><td id="gPos" class="r">&mdash;</td></tr>
+            <tr><td class="k">raw alt MSL</td><td id="gAlt" class="r">&mdash;</td></tr>
+            <tr><td class="k">fix age</td><td id="gAge" class="r">&mdash;</td></tr>
+            <tr><td class="k">meas rate</td><td id="gRate" class="r">&mdash;</td></tr>
+          </table>
+        </div>
+        <div class="panel">
+          <h2>Device</h2>
+          <table>
+            <tr><td class="k">at boot</td><td id="dBoot" class="chips"></td></tr>
+            <tr><td class="k">imu</td><td id="dImu" class="r">&mdash;</td></tr>
+            <tr><td class="k">mag / baro</td><td id="dMagBar" class="r">&mdash;</td></tr>
+            <tr><td class="k">gnss / output</td><td id="dGnss" class="r">&mdash;</td></tr>
+            <tr><td class="k">fw / schema</td><td id="dFw" class="r">&mdash;</td></tr>
+          </table>
+        </div>
+        <div class="panel">
+          <h2>Link / loop</h2>
+          <table>
+            <tr><td class="k">records / errors</td><td id="hRecs" class="r">0 / 0</td></tr>
+            <tr><td class="k">record rate</td><td id="hRx" class="r">&mdash;</td></tr>
+            <tr><td class="k">tx drops / seq gaps</td><td id="hDtx" class="r">&mdash;</td></tr>
+            <tr><td class="k">max loop (lmx)</td><td id="hLmx" class="r">&mdash;</td></tr>
+          </table>
+        </div>
+        <div class="panel">
+          <h2>Startup log</h2>
+          <div id="bootLog"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="page" id="pg-ctrl">
+      <div class="tables">
+        <div class="panel">
+          <h2>Calibration</h2>
+          <div class="ctlrow"><button id="cmdCal" class="secondary">Recalibrate sensors</button></div>
+          <div class="ctlrow"><button id="cmdMagCal" class="secondary">Mag cal (rotate 30 s)</button></div>
+          <div class="ctlrow"><button id="cmdMagClr" class="secondary">Clear stored mag cal</button></div>
+          <div class="ctlrow"><button id="cmdZero" class="secondary">Zero counters</button></div>
+        </div>
+        <div class="panel">
+          <h2>LEDs</h2>
+          <div class="ctlrow"><span class="k2">a &middot; PC10 &times;2</span><input type="color" id="ledA" value="#000000"><button id="cmdLedA" class="secondary mini">Set</button></div>
+          <div class="ctlrow"><span class="k2">b &middot; PC13 &times;4</span><input type="color" id="ledB" value="#000000"><button id="cmdLedB" class="secondary mini">Set</button></div>
+          <div class="ctlrow"><span class="k2">all</span><input type="color" id="ledAll" value="#000000"><button id="cmdLedAll" class="secondary mini">Set</button><button id="cmdLedOff" class="secondary mini">Off</button></div>
+        </div>
+        <div class="panel">
+          <h2>System</h2>
+          <div class="ctlrow"><button id="cmdPing" class="secondary">Ping</button></div>
+          <div class="ctlrow"><button id="cmdSens" class="secondary">Sensor health</button></div>
+          <div class="ctlrow"><button id="cmdLoraQ" class="secondary">LoRa status</button><button id="cmdLoraMute" class="secondary mini">Mute</button><button id="cmdLoraUn" class="secondary mini">Unmute</button></div>
+          <div class="ctlrow"><button id="cmdRst" class="secondary">Reboot</button></div>
+        </div>
+        <div class="panel">
+          <h2>Servos</h2>
+          <div class="ctlrow"><span class="k2">S0 &micro;s</span><input type="number" id="svUs0" value="1500" min="900" max="2100" step="10"><button id="svSet0" class="secondary mini">Set</button></div>
+          <div class="ctlrow"><span class="k2">S1 &micro;s</span><input type="number" id="svUs1" value="1500" min="900" max="2100" step="10"><button id="svSet1" class="secondary mini">Set</button></div>
+          <div class="ctlrow"><span class="k2">S2 &micro;s</span><input type="number" id="svUs2" value="1500" min="900" max="2100" step="10"><button id="svSet2" class="secondary mini">Set</button></div>
+          <div class="ctlrow"><span class="k2">S3 &micro;s</span><input type="number" id="svUs3" value="1500" min="900" max="2100" step="10"><button id="svSet3" class="secondary mini">Set</button></div>
+          <div class="ctlrow"><button id="svCenter" class="secondary mini">Center</button><button id="svSweep" class="secondary mini">Sweep 6 s</button><button id="svOff" class="secondary mini">Pulses off</button></div>
+        </div>
+        <div class="panel">
+          <h2>Canard angle</h2>
+          <div class="ctlrow"><span class="k2">canard</span><select id="angCh"></select><input type="number" id="angVal" value="0" min="-25" max="25" step="1"><span class="k2" style="min-width:0">&deg;</span><button id="angSet" class="secondary mini">Set</button></div>
+          <div class="ctlrow"><input type="range" id="angSlide" min="-25" max="25" step="1" value="0"></div>
+          <div class="ctlrow"><button id="angCenter" class="secondary mini" title="Command 0&deg; canard = calibrated neutral (fin straight). Calibrate the fin first in Linkage cal.">Neutral 0&deg;</button><button id="angTest" class="secondary mini" title="All four fins: +10&deg; then -10&deg; then 0&deg; (calibrated). Watch each fin move.">Test all fins</button><button id="angRel" class="secondary mini">Release</button><button id="angAllOff" class="secondary mini">All off</button><button id="angScan" class="secondary mini" title="Wiggles every PCA channel in turn (~19 s). Watch which servo moves on which console announcement to learn its real channel.">Scan 16 ch</button></div>
+          <div class="ctlrow"><span class="ro" style="color:var(--dim);font-size:11px">true canard degrees via linkage cal &middot; 0&deg; = neutral. Calibrate first or 0&deg; is just the raw servo center.</span></div>
+        </div>
+        <div class="panel">
+          <h2>Linkage cal</h2>
+          <div class="ctlrow"><span class="k2">fin</span><select id="lcFin"><option value="0">S0</option><option value="1">S1</option><option value="2">S2</option><option value="3">S3</option></select><button id="lcStart" class="secondary mini">Start</button><button id="lcAbort" class="secondary mini">End</button></div>
+          <div class="ctlrow"><span class="k2">jog &micro;s</span><button id="lcJm50" class="secondary mini">-50</button><button id="lcJm10" class="secondary mini">-10</button><button id="lcJp10" class="secondary mini">+10</button><button id="lcJp50" class="secondary mini">+50</button></div>
+          <div class="ctlrow"><button id="lcCenter" class="secondary mini" title="Record the current pulse as canard 0&deg; (jog until flush against a straightedge first).">Mark center 0&deg;</button><input type="number" id="lcDeg" value="0" step="0.5" title="Measured canard angle (phone inclinometer) at the current pulse."><button id="lcPoint" class="secondary mini">Save point</button><button id="lcUndo" class="secondary mini">Undo</button></div>
+          <div class="ctlrow"><button id="lcSave" class="secondary">Save to flash</button><button id="lcShow" class="secondary mini">Show</button><button id="lcClear" class="secondary mini">Delete all points</button></div>
+          <div class="ctlrow"><span class="k2">check &deg;</span><button class="secondary mini lcChk" data-d="-10">-10</button><button class="secondary mini lcChk" data-d="-5">-5</button><button class="secondary mini lcChk" data-d="0">0</button><button class="secondary mini lcChk" data-d="5">+5</button><button class="secondary mini lcChk" data-d="10">+10</button></div>
+          <div class="ctlrow"><button id="lcLoad" class="secondary mini" title="Copy the fin's active table into the staged points for editing.">Load table</button><button id="lcDump" class="secondary mini" title="Re-request the tables from the rocket.">Refresh</button><button id="lcFlash" class="secondary mini" title="Report what is physically stored in flash right now (run after a power cycle to confirm a save persisted).">Flash check</button></div>
+          <div id="lcPoints" class="lcpts"></div>
+          <canvas id="lcGraph"></canvas>
+          <div class="ctlrow"><span class="ro" style="color:var(--dim);font-size:11px">Offset-only: Start, jog flush, Mark center, Save (keeps default gain). Full curve: also add limit + midpoint measured points before Save. Then check &plusmn;5/&plusmn;10.</span></div>
+        </div>
+        <div class="panel">
+          <h2>Control</h2>
+          <div class="ctlrow"><span class="k2">mode</span><span class="ro" id="ctlModeRo">&mdash;</span></div>
+          <div class="ctlrow"><span class="k2">defl &deg;</span><span class="ro" id="ctlDeflRo">&mdash;</span></div>
+          <div class="ctlrow"><button id="ctlArm" class="secondary">Arm</button><button id="ctlDisarm" class="secondary">Disarm</button></div>
+          <div class="ctlrow"><button id="ctlRollTest" class="secondary">Roll hold test (ground)</button></div>
+          <div class="ctlrow"><span class="ro" style="color:var(--dim);font-size:11px">Roll test runs the real roll PID now &mdash; no launch needed. Rate mode: twist the airframe, canards fight the spin. Angle mode: it holds the heading it started in. Disarm to stop.</span></div>
+          <div class="ctlrow"><button id="ctlRate" class="secondary mini">Rate mode</button><button id="ctlAngle" class="secondary mini">Angle mode</button></div>
+          <div class="ctlrow"><span class="k2">kp ki kpa</span><input type="number" id="ctlKpr" value="0.08" step="0.01"><input type="number" id="ctlKir" value="0.05" step="0.01"><input type="number" id="ctlKpa" value="8.0" step="0.5"><button id="ctlGains" class="secondary mini">Apply</button></div>
+        </div>
+        <div class="panel">
+          <h2 class="loghead">Command log<span class="sp"></span><button id="cmdLogClear" class="secondary mini">Clear</button></h2>
+          <div id="cmdLog"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="page" id="pg-comms">
+      <div class="charts">
+        <canvas class="chart" id="chRate"></canvas>
+        <canvas class="chart" id="chTput"></canvas>
+        <canvas class="chart" id="chLoss"></canvas>
+        <canvas class="chart" id="chRssi"></canvas>
+      </div>
+      <div class="duo">
+        <div class="panel">
+          <h2>Link</h2>
+          <table>
+            <tr><td class="k">link</td><td id="cLink" class="r">&mdash;</td></tr>
+            <tr><td class="k">record rate</td><td id="cRate" class="r">&mdash;</td></tr>
+            <tr><td class="k">throughput</td><td id="cTput" class="r">&mdash;</td></tr>
+            <tr><td class="k">bytes this session</td><td id="cBytes" class="r">&mdash;</td></tr>
+            <tr><td class="k">records / parse err</td><td id="cRecs" class="r">&mdash;</td></tr>
+            <tr><td class="k">lost records (seq gaps)</td><td id="cLoss" class="r">&mdash;</td></tr>
+            <tr><td class="k">fw tx drops (dtx)</td><td id="cDtx" class="r">&mdash;</td></tr>
+            <tr><td class="k">data age</td><td id="cAge" class="r">&mdash;</td></tr>
+            <tr><td class="k">RSSI</td><td id="cRssi" class="r">&mdash;</td></tr>
+            <tr><td class="k">SNR</td><td id="cSnr" class="r">&mdash;</td></tr>
+          </table>
+        </div>
+        <div class="panel">
+          <h2 class="loghead">Console <span id="consoleState" style="color:var(--dim);font-size:10px"></span><span class="sp"></span><button id="consolePauseB" class="secondary mini">Pause</button><button id="consoleClear" class="secondary mini">Clear</button></h2>
+          <div id="console" title="Raw wire stream. Scroll up to read back (new lines keep coming); click to pause the feed."></div>
+          <div class="conrow"><span class="cprompt">&gt;</span><input id="consoleIn" type="text" spellcheck="false" autocomplete="off" placeholder="$cmd &mdash; Enter sends, &uarr;&darr; history"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ==== PARSE-CORE-BEGIN ====
+   Pure record-handling core: no DOM, no globals beyond these definitions.
+   Kept in its own delimited section so a host test harness (node) can
+   extract and exercise exactly the code the viewer runs. */
+
+/* Classify one serial line. Returns {kind, rec?}:
+   kind = "empty" | "error" (unparseable / wrong shape) | "hdr" | "org" |
+          "st" | "unknown" (valid JSON, unrecognized t). */
+function parseLine(line) {
+  const s = line.trim();
+  if (!s) return { kind: "empty" };
+  let r;
+  try { r = JSON.parse(s); } catch (e) { return { kind: "error" }; }
+  if (!r || typeof r !== "object" || typeof r.t !== "string")
+    return { kind: "error" };
+  if (r.t === "hdr") return { kind: "hdr", rec: r };
+  if (r.t === "org") return { kind: "org", rec: r };
+  if (r.t === "st") {
+    if (typeof r.us !== "number" || typeof r.seq !== "number")
+      return { kind: "error" };
+    return { kind: "st", rec: r };
+  }
+  if (r.t === "msg") {
+    if (typeof r.txt !== "string") return { kind: "error" };
+    return { kind: "msg", rec: r };
+  }
+  if (r.t === "cal") return { kind: "cal", rec: r };
+  if (r.t === "lcal") return { kind: "lcal", rec: r };
+  return { kind: "unknown", rec: r };
+}
+
+/* CSV flattening of an "st" record: one column per scalar, arrays expanded,
+   JSON null -> empty cell. Column order matches stToCsvRow exactly. */
+const CSV_COLS = [
+  "us","seq","fst","alq","lat","lon","alt",
+  "p_n","p_e","p_d","v_n","v_e","v_d",
+  "q_w","q_x","q_y","q_z","eul_roll","eul_pitch","eul_yaw",
+  "sp_n","sp_e","sp_d","sv_n","sv_e","sv_d","sa_n","sa_e","sa_d",
+  "bg_x","bg_y","bg_z","ba_x","ba_y","ba_z","bb","ral","rvs","sra","srv",
+  "acc_x","acc_y","acc_z","gyr_x","gyr_y","gyr_z","mag_x","mag_y","mag_z",
+  "mgr_x","mgr_y","mgr_z",
+  "pa","tc","gfix","gsv","ghac","gvac","gsac","glat","glon","galt","gage",
+  "igp_n","igp_e","igp_d","igv_n","igv_e","igv_d","img","ibr",
+  "ngp","ngv","nmg","nbr","kgp","kgv","kmg","kbr",
+  "himu","hmag","hbar","hgps","dimu","dmag","dbar","dgps","dtx",
+  "ei2c","ri2c","grz","fhz","lmx",
+  "lre","rssi","snr","ltx","lrx","lcrc",
+  "cmode","cdef_0","cdef_1","cdef_2","cdef_3",
+];
+function stToCsvRow(r) {
+  const c = v => (v === null || v === undefined ||
+                  (typeof v === "number" && !isFinite(v))) ? "" : String(v);
+  const a = (v, i) => (v && v[i] !== undefined && v[i] !== null) ? c(v[i]) : "";
+  return [
+    c(r.us), c(r.seq), c(r.fst), c(r.alq), c(r.lat), c(r.lon), c(r.alt),
+    a(r.p, 0), a(r.p, 1), a(r.p, 2), a(r.v, 0), a(r.v, 1), a(r.v, 2),
+    a(r.q, 0), a(r.q, 1), a(r.q, 2), a(r.q, 3),
+    a(r.eul, 0), a(r.eul, 1), a(r.eul, 2),
+    a(r.sp, 0), a(r.sp, 1), a(r.sp, 2), a(r.sv, 0), a(r.sv, 1), a(r.sv, 2),
+    a(r.sa, 0), a(r.sa, 1), a(r.sa, 2),
+    a(r.bg, 0), a(r.bg, 1), a(r.bg, 2), a(r.ba, 0), a(r.ba, 1), a(r.ba, 2),
+    c(r.bb), c(r.ral), c(r.rvs), c(r.sra), c(r.srv),
+    a(r.acc, 0), a(r.acc, 1), a(r.acc, 2),
+    a(r.gyr, 0), a(r.gyr, 1), a(r.gyr, 2),
+    a(r.mag, 0), a(r.mag, 1), a(r.mag, 2),
+    a(r.mgr, 0), a(r.mgr, 1), a(r.mgr, 2),
+    c(r.pa), c(r.tc), c(r.gfix), c(r.gsv), c(r.ghac), c(r.gvac), c(r.gsac),
+    c(r.glat), c(r.glon), c(r.galt), c(r.gage),
+    a(r.igp, 0), a(r.igp, 1), a(r.igp, 2),
+    a(r.igv, 0), a(r.igv, 1), a(r.igv, 2), c(r.img), c(r.ibr),
+    c(r.ngp), c(r.ngv), c(r.nmg), c(r.nbr),
+    c(r.kgp), c(r.kgv), c(r.kmg), c(r.kbr),
+    c(r.himu), c(r.hmag), c(r.hbar), c(r.hgps),
+    c(r.dimu), c(r.dmag), c(r.dbar), c(r.dgps), c(r.dtx),
+    c(r.ei2c), c(r.ri2c), c(r.grz), c(r.fhz), c(r.lmx),
+    c(r.lre), c(r.rssi), c(r.snr), c(r.ltx), c(r.lrx), c(r.lcrc),
+    c(r.cmode), a(r.cdef, 0), a(r.cdef, 1), a(r.cdef, 2), a(r.cdef, 3),
+  ];
+}
+/* ==== PARSE-CORE-END ==== */
+</script>
+<script>
+"use strict";
+/* ================= utilities ================= */
+const $ = id => document.getElementById(id);
+const fmt = (v, d) => (v === null || v === undefined || !isFinite(v)) ? "—" : v.toFixed(d);
+const D2R = Math.PI / 180, R2D = 180 / Math.PI;
+
+/* DPR-aware canvas sizing. CSS height is fixed in the stylesheet, so layout
+   never feeds back from the backing store; we only sync the store here. */
+function fitCanvas(c) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(50, Math.round(c.clientWidth * dpr));
+  const h = Math.max(30, Math.round(c.clientHeight * dpr));
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  return c.getContext("2d");
+}
+
+/* Canvas palette, mirrored from the CSS tokens so every hand-drawn panel
+   follows the light/dark theme. Refreshed by applyTheme(). */
+const PAL = {};
+function refreshPal() {
+  const cs = getComputedStyle(document.documentElement);
+  for (const k of ["text", "dim", "grid", "edge", "accent", "good", "warn",
+                   "bad", "c1", "c2", "c3", "c4", "mark", "panel2"]) {
+    PAL[k] = cs.getPropertyValue("--" + k).trim();
+  }
+}
+refreshPal();
+
+/* ================= state ================= */
+const S = {
+  connected: false, sim: false,
+  lcal: { fins: [null, null, null, null], stage: null },
+  hdr: null, org: null, last: null,
+  recCount: 0, parseErr: 0, seqGaps: 0, lastSeq: null,
+  t0_us: null,                       // first record timestamp
+  rawLines: [], rawBytes: 0,         // whole-session raw capture (.jsonl)
+  session: [],                       // parsed st records (scrollback + .csv)
+  paused: false, view: null,         // scrub state (view = displayed record)
+  consolePaused: false, consoleLines: [], consoleDirty: true,
+  geoTrack: [], lastGeoPush: -1,      // est lat/lon path for the map
+  geoRaw: [],                         // raw GNSS fixes (deduped)
+  msgs: [], cal: null, bootDirty: true,
+  maxRal: null, maxRalT: null,        // apogee tracker (max AGL this session)
+  maxAcc: null,                       // max |accel| m/s^2 (dial bug + scale)
+  rxWall: [],                        // arrival wall-clock times, rate window
+  byteWin: [],                       // {w, b} rolling window for throughput
+  lastRxWall: 0,
+};
+
+function resetSession() {
+  S.hdr = null; S.org = null; S.last = null; S.view = null;
+  S.recCount = 0; S.parseErr = 0; S.seqGaps = 0; S.lastSeq = null;
+  S.t0_us = null;
+  S.rawLines = []; S.rawBytes = 0; S.session = [];
+  S.geoTrack = []; S.lastGeoPush = -1; S.geoRaw = [];
+  S.msgs = []; S.cal = null; S.bootDirty = true;
+  S.maxRal = null; S.maxRalT = null; S.maxAcc = null; DIAL.fs = 4;
+  if (MAP.anchor && MAP.anchor.src !== "manual") MAP.anchor = null;
+  S.rxWall = []; S.lastRxWall = 0; S.byteWin = [];
+  S.consoleLines = []; S.consoleDirty = true;
+  // Linkage tables belong to the CONNECTION: stale ones from a previous
+  // rocket/boot invite calibration decisions against the wrong fin data.
+  S.lcal = { fins: [null, null, null, null], stage: null };
+  renderLcalPoints();
+  for (const k in charts) charts[k].clear();
+  if (S.paused) setPaused(false);
+}
+
+/* ================= chart component ================= */
+class Chart {
+  constructor(canvas, title, unit, series, opts = {}) {
+    this.c = canvas; this.title = title; this.unit = unit;
+    this.series = series;             // [{label, color: PAL key or css}]
+    this.win = opts.win || 10;        // seconds
+    this.gates = opts.gates || [];    // horizontal dashed lines
+    this.markers = [];                // [{t, y}] reject dots
+    this.cap = 4096;
+    this.t = new Float64Array(this.cap);
+    this.v = series.map(() => new Float32Array(this.cap));
+    this.head = 0; this.n = 0;
+  }
+  clear() { this.head = 0; this.n = 0; this.markers.length = 0; }
+  push(t, vals) {
+    const i = this.head;
+    this.t[i] = t;
+    for (let k = 0; k < this.series.length; k++) {
+      const x = vals[k];
+      this.v[k][i] = (x === null || x === undefined) ? NaN : x;
+    }
+    this.head = (this.head + 1) % this.cap;
+    if (this.n < this.cap) this.n++;
+  }
+  mark(t, y) {
+    this.markers.push({ t, y });
+    if (this.markers.length > 500) this.markers.shift();
+  }
+  col(k) { const c = this.series[k].color; return PAL[c] || c; }
+  draw(now) {
+    const g = fitCanvas(this.c);
+    const dpr = window.devicePixelRatio || 1;
+    const W = this.c.width, H = this.c.height;
+    g.clearRect(0, 0, W, H);
+    g.font = `${10.5 * dpr}px Consolas, monospace`;
+    const padL = 42 * dpr, padT = 18 * dpr, padB = 5 * dpr, padR = 5 * dpr;
+    const t1 = now, t0 = now - this.win;
+    // collect visible values for autoscale (percentile-trimmed so one bad
+    // record can't flatten the trace; proportional padding so a constant
+    // series doesn't imply an impossible span). lastv feeds the live legend.
+    const vals = [];
+    const idx = [];
+    const lastv = this.series.map(() => NaN);
+    for (let j = 0; j < this.n; j++) {
+      const i = (this.head - 1 - j + this.cap * 2) % this.cap;
+      if (this.t[i] > t1) continue;
+      if (this.t[i] < t0) break;
+      idx.push(i);
+      for (let k = 0; k < this.series.length; k++) {
+        const x = this.v[k][i];
+        if (isFinite(x)) { vals.push(x); if (!isFinite(lastv[k])) lastv[k] = x; }
+      }
+    }
+    for (const gate of this.gates) vals.push(gate);
+    let lo = 0, hi = 1;
+    if (vals.length > 1) {
+      vals.sort((a, b) => a - b);
+      lo = vals[Math.floor(vals.length * 0.005)];
+      hi = vals[Math.ceil(vals.length * 0.995) - 1];
+    }
+    let span = hi - lo;
+    const mag = Math.max(Math.abs(lo), Math.abs(hi), 1e-9);
+    if (span < 0.05 * mag) span = 0.05 * mag;
+    if (span < 1e-9) span = 1;
+    lo -= span * 0.22; hi += span * 0.22; span = hi - lo;
+    const X = t => padL + (W - padL - padR) * (t - t0) / (t1 - t0);
+    const Y = v => padT + (H - padT - padB) * (1 - (v - lo) / span);
+    // frame + y labels
+    g.strokeStyle = PAL.grid; g.lineWidth = dpr;
+    g.strokeRect(padL, padT, W - padL - padR, H - padT - padB);
+    g.fillStyle = PAL.dim;
+    g.textAlign = "right";
+    g.fillText(this.fmtTick(hi), padL - 3 * dpr, padT + 8 * dpr);
+    g.fillText(this.fmtTick(lo), padL - 3 * dpr, H - padB - 2 * dpr);
+    // title (left) + live-value legend (right)
+    g.textAlign = "left";
+    g.fillText(`${this.title} · ${this.unit}`, padL + 2 * dpr, 11 * dpr);
+    g.textAlign = "right";
+    let lx = W - padR;
+    const titleEnd = padL + (this.title.length + this.unit.length + 6) *
+        6.4 * dpr;
+    for (let k = this.series.length - 1; k >= 0; k--) {
+      const s = this.series[k];
+      const txt = s.label +
+          (isFinite(lastv[k]) ? " " + this.fmtTick(lastv[k]) : "");
+      const nx = lx - (txt.length + 1.6) * 6.4 * dpr;
+      if (nx < titleEnd) break;    // narrow strip: drop labels, keep title
+      g.fillStyle = this.col(k);
+      g.fillText(txt, lx, 11 * dpr);
+      lx = nx;
+    }
+    // gates
+    g.setLineDash([4 * dpr, 4 * dpr]);
+    g.strokeStyle = PAL.bad;
+    for (const gate of this.gates) {
+      if (gate < lo || gate > hi) continue;
+      g.beginPath(); g.moveTo(padL, Y(gate)); g.lineTo(W - padR, Y(gate));
+      g.stroke();
+    }
+    g.setLineDash([]);
+    // series
+    for (let k = 0; k < this.series.length; k++) {
+      g.strokeStyle = this.col(k);
+      g.lineWidth = 1.6 * dpr;
+      g.setLineDash((this.series[k].dash || []).map(x => x * dpr));
+      g.beginPath();
+      let pen = false;
+      for (let j = idx.length - 1; j >= 0; j--) {
+        const i = idx[j];
+        const x = this.v[k][i];
+        if (!isFinite(x)) { pen = false; continue; }
+        const px = X(this.t[i]), py = Y(Math.max(lo, Math.min(hi, x)));
+        if (!pen) { g.moveTo(px, py); pen = true; } else g.lineTo(px, py);
+      }
+      g.stroke();
+    }
+    g.setLineDash([]);
+    // reject markers
+    g.fillStyle = PAL.bad;
+    for (const m of this.markers) {
+      if (m.t < t0 || m.t > t1) continue;
+      const y = isFinite(m.y) ? Y(Math.max(lo, Math.min(hi, m.y))) : padT + 6 * dpr;
+      g.beginPath(); g.arc(X(m.t), y, 2.2 * dpr, 0, 7); g.fill();
+    }
+  }
+  fmtTick(v) {
+    const a = Math.abs(v);
+    if (a >= 1000) return v.toFixed(0);
+    if (a >= 10) return v.toFixed(1);
+    if (a >= 0.1) return v.toFixed(2);
+    return v.toExponential(0);
+  }
+}
+
+/* ================= charts: the important six + comms ================= */
+const charts = {
+  alt: new Chart($("chAlt"), "altitude AGL", "m", [
+    { label: "agl", color: "c1" }]),
+  att: new Chart($("chAtt"), "attitude", "deg", [
+    { label: "roll", color: "c1" }, { label: "pitch", color: "c2" },
+    { label: "yaw", color: "c3" }]),
+  gyr: new Chart($("chGyr"), "gyro", "deg/s", [
+    { label: "x", color: "c1" }, { label: "y", color: "c2" },
+    { label: "z", color: "c3" }]),
+  mag: new Chart($("chMag"), "mag raw", "µT", [
+    { label: "x", color: "c1" }, { label: "y", color: "c2" },
+    { label: "z", color: "c3" }, { label: "|m|", color: "c4" }]),
+  rate: new Chart($("chRate"), "record rate", "Hz", [
+    { label: "rx", color: "c1" }]),
+  tput: new Chart($("chTput"), "throughput", "kB/s", [
+    { label: "rx", color: "c1" }]),
+  loss: new Chart($("chLoss"), "lost records", "count", [
+    { label: "gaps", color: "c1" }, { label: "dtx", color: "c3" }]),
+  rssi: new Chart($("chRssi"), "signal", "dBm | dB", [
+    { label: "rssi", color: "c1" }, { label: "snr", color: "c2" }]),
+};
+
+/* ================= acceleration dial =================
+   |specific force| in g on the round speedometer-style gauge: 270-degree
+   sweep, adaptive full scale (4/8/16/32 g — the IMU tops out at 32), a dim
+   max-g bug, digital readout in the bottom gap. Reads ~1 g at rest,
+   thrust g in boost, ~0 g through coast and free-fall. */
+const DIAL = { fs: 4 };
+const DIAL_STEPS = [4, 8, 16, 32];
+const G0 = 9.80665;
+function drawDial(r) {
+  const c = $("dialAcc");
+  if (!c || c.offsetParent === null) return;
+  const g = fitCanvas(c);
+  const dpr = window.devicePixelRatio || 1;
+  const W = c.width, H = c.height;
+  g.clearRect(0, 0, W, H);
+  const cx = W / 2, cy = H / 2;
+  const R = Math.min(W, H) / 2 - 10 * dpr;
+  if (R < 20 * dpr) return;
+  let am = null;
+  if (r && r.acc) am = Math.hypot(r.acc[0], r.acc[1], r.acc[2]);
+  const gs = am === null ? null : am / G0;
+  const need = Math.max(gs || 0, (S.maxAcc || 0) / G0);
+  for (const s of DIAL_STEPS) {
+    if (need <= s * 0.95) { DIAL.fs = Math.max(DIAL.fs, s); break; }
+  }
+  const a0 = Math.PI * 0.75, sweep = Math.PI * 1.5;
+  const ang = v => a0 + sweep * Math.min(1, Math.max(0, v / DIAL.fs));
+  g.strokeStyle = PAL.grid; g.lineWidth = 2 * dpr;
+  g.beginPath(); g.arc(cx, cy, R, a0, a0 + sweep); g.stroke();
+  g.font = `${10 * dpr}px Consolas, monospace`;
+  g.textAlign = "center"; g.textBaseline = "middle";
+  const minor = DIAL.fs / 16, major = DIAL.fs / 8, lab = DIAL.fs / 4;
+  for (let v = 0; v <= DIAL.fs + 1e-6; v += minor) {
+    const a = ang(v);
+    const isMaj = Math.abs(v / major - Math.round(v / major)) < 1e-3;
+    const r1 = R - (isMaj ? 9 : 5) * dpr;
+    g.strokeStyle = isMaj ? PAL.text : PAL.dim;
+    g.lineWidth = (isMaj ? 1.6 : 1) * dpr;
+    g.beginPath();
+    g.moveTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+    g.lineTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R);
+    g.stroke();
+    if (Math.abs(v / lab - Math.round(v / lab)) < 1e-3) {
+      const r2 = R - 20 * dpr;
+      g.fillStyle = PAL.text;
+      g.fillText(String(Math.round(v)),
+                 cx + Math.cos(a) * r2, cy + Math.sin(a) * r2);
+    }
+  }
+  if (S.maxAcc !== null && S.maxAcc > 0) {   // max-g bug
+    const a = ang(S.maxAcc / G0);
+    g.strokeStyle = PAL.dim; g.lineWidth = 2.2 * dpr;
+    g.beginPath();
+    g.moveTo(cx + Math.cos(a) * (R - 14 * dpr),
+             cy + Math.sin(a) * (R - 14 * dpr));
+    g.lineTo(cx + Math.cos(a) * (R + 3 * dpr),
+             cy + Math.sin(a) * (R + 3 * dpr));
+    g.stroke();
+  }
+  if (gs !== null) {                         // needle
+    const a = ang(gs);
+    g.strokeStyle = PAL.text; g.lineWidth = 2.4 * dpr;
+    g.beginPath();
+    g.moveTo(cx - Math.cos(a) * 10 * dpr, cy - Math.sin(a) * 10 * dpr);
+    g.lineTo(cx + Math.cos(a) * (R - 15 * dpr),
+             cy + Math.sin(a) * (R - 15 * dpr));
+    g.stroke();
+  }
+  g.fillStyle = PAL.text;
+  g.beginPath(); g.arc(cx, cy, 3.5 * dpr, 0, 7); g.fill();
+  g.fillStyle = PAL.dim;
+  g.fillText("ACC \u00b7 G", cx, cy - R * 0.42);
+  g.font = `600 ${15 * dpr}px Consolas, monospace`;
+  g.fillStyle = PAL.text;
+  g.fillText(gs === null ? "\u2014" : gs.toFixed(2), cx, cy + R * 0.45);
+  g.font = `${10 * dpr}px Consolas, monospace`;
+  g.fillStyle = PAL.dim;
+  g.fillText(am === null ? "" : am.toFixed(1) + " M/S\u00b2", cx, cy + R * 0.68);
+  g.textBaseline = "alphabetic";
+}
+
+/* ================= 3D attitude view =================
+   Hand-rolled orthographic renderer, no libraries: orbitable camera,
+   painter-sorted triangle soup, built-in rocket or a user-loaded STL.
+   Body frame matches the firmware: X out the nose, Y right, Z down;
+   q is body->NED [w,x,y,z]; display world is (E, N, Up). */
+function quatMat(q) {
+  const [w, x, y, z] = q;
+  return [
+    1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y),
+    2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
+    2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)];
+}
+
+/* --- orbit camera. u = r x f with NO extra negation: world-up must project
+   to screen-up (a sign bug here once mirrored the whole display and sent a
+   firmware "fix" chasing the wrong layer). --- */
+const VIEW = { az: 35, el: 22, zoom: 1, dragging: false };
+function camBasis() {
+  const az = VIEW.az * D2R, el = VIEW.el * D2R;   // el clamped to +/-85
+  const f = [-Math.sin(az) * Math.cos(el), -Math.cos(az) * Math.cos(el),
+             -Math.sin(el)];
+  const rn = Math.hypot(f[1], f[0]) || 1;
+  const r = [f[1] / rn, -f[0] / rn, 0];
+  const u = [r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2],
+             r[0] * f[1] - r[1] * f[0]];
+  return { f, r, u };
+}
+function resetView() { VIEW.az = 35; VIEW.el = 22; VIEW.zoom = 1; }
+
+/* --- model store: flat triangle soup in body coordinates --- */
+const MODEL = { name: "", tris: null, cols: null, n: 0,
+                px: null, pz: null, sh: null, order: null,
+                stlBase: null, stlName: "", axisMode: 0 };
+const STL_COL = [141, 166, 200];
+
+function setModelTris(tris, cols, name) {
+  MODEL.tris = tris; MODEL.cols = cols; MODEL.n = tris.length / 9;
+  MODEL.name = name;
+  MODEL.px = new Float32Array(MODEL.n * 6);   // screen x,y per vertex
+  MODEL.pz = new Float32Array(MODEL.n);       // depth per tri
+  MODEL.sh = new Float32Array(MODEL.n);       // shade per tri (-1 = skip)
+  MODEL.order = new Array(MODEL.n);
+  const mi = $("modelInfo");
+  if (mi) mi.textContent = `${name} · ${MODEL.n} tris`;
+  const bn = $("btnNoseAxis");
+  if (bn) bn.disabled = !MODEL.stlBase;
+}
+
+function builtinModel() {
+  const NSEG = 20, RB = 0.062;
+  const tris = [], cols = [];
+  const tri = (a, b, c, col) => {
+    tris.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+    cols.push(col);
+  };
+  const ring = (x, r) => {
+    const p = [];
+    for (let i = 0; i < NSEG; i++) {
+      const a = i / NSEG * 2 * Math.PI;
+      p.push([x, r * Math.cos(a), r * Math.sin(a)]);
+    }
+    return p;
+  };
+  // stations [x, radius, color]: tangent-ogive nose, tube, boattail
+  const tipX = 0.55, Lo = 0.32, rho = (RB * RB + Lo * Lo) / (2 * RB);
+  const prof = [];
+  for (let i = 0; i <= 6; i++) {
+    const d = Lo * (i / 6);                      // distance from the tip
+    const r = Math.sqrt(Math.max(0, rho * rho - (Lo - d) * (Lo - d))) + RB - rho;
+    prof.push([tipX - d, Math.max(0, r), [226, 98, 98]]);
+  }
+  prof.push([-0.37, RB, [205, 216, 234]]);       // body tube
+  prof.push([-0.47, 0.045, [124, 138, 165]]);    // boattail
+  const rings = prof.map(p => ring(p[0], p[1]));
+  for (let k = 0; k + 1 < prof.length; k++) {
+    const A = rings[k], B = rings[k + 1], col = prof[k + 1][2];
+    for (let i = 0; i < NSEG; i++) {
+      const j = (i + 1) % NSEG;
+      tri(A[i], B[i], B[j], col);
+      tri(A[i], B[j], A[j], col);
+    }
+  }
+  const last = rings[rings.length - 1], baseC = [-0.47, 0, 0];
+  for (let i = 0; i < NSEG; i++) {               // base cap
+    const j = (i + 1) % NSEG;
+    tri(baseC, last[j], last[i], [70, 80, 100]);
+  }
+  for (let k = 0; k < 4; k++) {                  // swept fins, X-pattern
+    const a = Math.PI / 4 + k * Math.PI / 2;
+    const ca = Math.cos(a), sa = Math.sin(a);
+    const P = (x, r) => [x, r * ca, r * sa];
+    const col = [88, 156, 240];
+    tri(P(-0.24, RB), P(-0.40, 0.185), P(-0.47, 0.185), col);
+    tri(P(-0.24, RB), P(-0.47, 0.185), P(-0.47, RB), col);
+  }
+  return [new Float32Array(tris), cols];
+}
+
+/* --- STL loading: binary or ASCII, hand-parsed. Normals are recomputed
+   from vertices (stored ones are often garbage). Model is centered and
+   scaled to ~unit length; the Nose button cycles which STL axis is the
+   nose (CAD rockets are usually modeled Z-up). Session-only: an uploaded
+   model is not persisted across reloads. --- */
+const AXIS_MAPS = [               // body = m * stl (all det = +1)
+  { m: [0, 0, 1, 1, 0, 0, 0, 1, 0], lbl: "+Z" },
+  { m: [0, 0, -1, 1, 0, 0, 0, -1, 0], lbl: "-Z" },
+  { m: [1, 0, 0, 0, 1, 0, 0, 0, 1], lbl: "+X" },
+  { m: [-1, 0, 0, 0, 1, 0, 0, 0, -1], lbl: "-X" },
+  { m: [0, 1, 0, 0, 0, 1, 1, 0, 0], lbl: "+Y" },
+  { m: [0, -1, 0, 0, 0, 1, -1, 0, 0], lbl: "-Y" },
+];
+function parseStl(buf) {
+  if (buf.byteLength >= 84) {
+    const dv = new DataView(buf);
+    const n = dv.getUint32(80, true);
+    if (n > 0 && 84 + n * 50 === buf.byteLength) {
+      if (n > 500000) throw new Error(`too large (${n} tris)`);
+      const out = new Float32Array(n * 9);
+      for (let i = 0; i < n; i++) {
+        const o = 84 + i * 50 + 12;              // skip the stored normal
+        for (let k = 0; k < 9; k++)
+          out[i * 9 + k] = dv.getFloat32(o + k * 4, true);
+      }
+      return out;
+    }
+  }
+  const txt = new TextDecoder().decode(buf);
+  if (txt.indexOf("vertex") < 0) throw new Error("not a recognizable STL");
+  const re = /vertex\s+([-+\d.eE]+)\s+([-+\d.eE]+)\s+([-+\d.eE]+)/g;
+  const v = [];
+  let m;
+  while ((m = re.exec(txt)) !== null) {
+    v.push(parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3]));
+    if (v.length > 500000 * 9) throw new Error("too large");
+  }
+  if (v.length < 9 || v.length % 9 !== 0) throw new Error("bad ASCII STL");
+  return new Float32Array(v);
+}
+function decimateTris(t, cap) {
+  // Vertex-clustering simplification (Rossignac-Borrel): snap vertices to a
+  // uniform grid, replace each cell's vertices by their mean, drop triangles
+  // that collapse (or duplicate) after snapping. Unlike keeping every Nth
+  // triangle, this preserves a CLOSED surface — naive subsampling punches
+  // holes and renders as a see-through wireframe. Expects normalized coords
+  // (~unit box). Grid resolution walks down until the budget is met.
+  let n = t.length / 9;
+  if (n <= cap) return t;
+  let N = 64;
+  let best = null;
+  for (let iter = 0; iter < 8; iter++) {
+    const cell = new Map();            // cellId -> vertex-mean accumulator
+    const cid = new Int32Array(n * 3);
+    const q = v => Math.max(0, Math.min(N - 1, ((v + 0.6) / 1.2 * N) | 0));
+    for (let v = 0; v < n * 3; v++) {
+      const x = t[v * 3], y = t[v * 3 + 1], z = t[v * 3 + 2];
+      const id = (q(x) * N + q(y)) * N + q(z);
+      let e = cell.get(id);
+      if (!e) { e = { sx: 0, sy: 0, sz: 0, c: 0 }; cell.set(id, e); }
+      e.sx += x; e.sy += y; e.sz += z; e.c++;
+      cid[v] = id;
+    }
+    const seen = new Set();
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const a = cid[i * 3], b = cid[i * 3 + 1], c = cid[i * 3 + 2];
+      if (a === b || b === c || a === c) continue;   // collapsed: drop
+      const lo = Math.min(a, b, c), hi = Math.max(a, b, c);
+      const key = lo + "," + (a + b + c - lo - hi) + "," + hi;
+      if (seen.has(key)) continue;                   // coincident duplicate
+      seen.add(key);
+      for (const id of [a, b, c]) {
+        const e = cell.get(id);
+        out.push(e.sx / e.c, e.sy / e.c, e.sz / e.c);
+      }
+    }
+    best = new Float32Array(out);
+    if (out.length / 9 <= cap) return best;
+    N = Math.max(8, (N * 0.72) | 0);   // over budget: coarser grid
+  }
+  return best.subarray(0, cap * 9);    // pathological mesh: hard cap
+}
+function normalizeStl(t) {
+  let mn = [1e30, 1e30, 1e30], mx = [-1e30, -1e30, -1e30];
+  for (let i = 0; i < t.length; i += 3)
+    for (let k = 0; k < 3; k++) {
+      if (t[i + k] < mn[k]) mn[k] = t[i + k];
+      if (t[i + k] > mx[k]) mx[k] = t[i + k];
+    }
+  const ctr = [0, 1, 2].map(k => (mn[k] + mx[k]) / 2);
+  const ext = Math.max(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]) || 1;
+  const sc = 1.05 / ext;
+  for (let i = 0; i < t.length; i += 3)
+    for (let k = 0; k < 3; k++) t[i + k] = (t[i + k] - ctr[k]) * sc;
+}
+function applyAxisMap() {
+  const base = MODEL.stlBase, m = AXIS_MAPS[MODEL.axisMode].m;
+  const out = new Float32Array(base.length);
+  for (let i = 0; i < base.length; i += 3) {
+    const x = base[i], y = base[i + 1], z = base[i + 2];
+    out[i] = m[0] * x + m[1] * y + m[2] * z;
+    out[i + 1] = m[3] * x + m[4] * y + m[5] * z;
+    out[i + 2] = m[6] * x + m[7] * y + m[8] * z;
+  }
+  setModelTris(out, null,
+               `${MODEL.stlName} (nose ${AXIS_MAPS[MODEL.axisMode].lbl})`);
+}
+function loadStl(buf, name) {
+  let t = parseStl(buf);
+  normalizeStl(t);              // clustering grid assumes unit-box coords
+  t = decimateTris(t, 12000);   // painter sort + fill budget at 30 fps
+  MODEL.stlBase = t;
+  MODEL.stlName = name.replace(/\.stl$/i, "");
+  MODEL.axisMode = 0;
+  applyAxisMap();
+}
+
+const LIGHT = (() => {
+  const l = [0.35, 0.25, 0.9];
+  const n = Math.hypot(l[0], l[1], l[2]);
+  return l.map(x => x / n);
+})();
+
+function drawRocket3D(rec) {
+  const c = $("rocket3d");
+  if (!c) return;
+  const g = fitCanvas(c);
+  const dpr = window.devicePixelRatio || 1;
+  const W = c.width, H = c.height, cx = W / 2, cy = H / 2;
+  g.clearRect(0, 0, W, H);
+  const cam = camBasis();
+  const q = (rec && rec.q) ? rec.q : [1, 0, 0, 0];
+  const M = quatMat(q);
+  const scale = Math.min(W, H) * 0.62 * VIEW.zoom;
+  const gp = [0, 0];
+  const prj = (wx, wy, wz, out, o) => {     // world (E,N,Up) -> screen
+    out[o] = cx + (wx * cam.r[0] + wy * cam.r[1] + wz * cam.r[2]) * scale;
+    out[o + 1] = cy - (wx * cam.u[0] + wy * cam.u[1] + wz * cam.u[2]) * scale;
+    return wx * cam.f[0] + wy * cam.f[1] + wz * cam.f[2];
+  };
+  // ground ring below the model, with a north tick
+  g.strokeStyle = PAL.grid; g.fillStyle = PAL.dim; g.lineWidth = dpr;
+  g.font = `${9 * dpr}px Consolas, monospace`; g.textAlign = "center";
+  g.beginPath();
+  for (let i = 0; i <= 48; i++) {
+    const a = i / 48 * 2 * Math.PI;
+    prj(0.62 * Math.sin(a), 0.62 * Math.cos(a), -0.5, gp, 0);
+    if (i === 0) g.moveTo(gp[0], gp[1]); else g.lineTo(gp[0], gp[1]);
+  }
+  g.stroke();
+  prj(0, 0.62, -0.5, gp, 0);
+  g.fillText("N", gp[0], gp[1] - 3 * dpr);
+
+  const T = MODEL.tris, n = MODEL.n;
+  const px = MODEL.px, pz = MODEL.pz, sh = MODEL.sh, order = MODEL.order;
+  for (let i = 0; i < n; i++) {
+    let depth = 0;
+    let w0x = 0, w0y = 0, w0z = 0, ax = 0, ay = 0, az = 0, bx = 0, by = 0, bz = 0;
+    for (let v = 0; v < 3; v++) {
+      const o = i * 9 + v * 3;
+      const X = T[o], Y = T[o + 1], Z = T[o + 2];
+      const nn = M[0] * X + M[1] * Y + M[2] * Z;   // body -> NED
+      const ee = M[3] * X + M[4] * Y + M[5] * Z;
+      const dd = M[6] * X + M[7] * Y + M[8] * Z;
+      const wx = ee, wy = nn, wz = -dd;            // NED -> (E, N, Up)
+      depth += prj(wx, wy, wz, px, i * 6 + v * 2);
+      if (v === 0) { w0x = wx; w0y = wy; w0z = wz; }
+      else if (v === 1) { ax = wx - w0x; ay = wy - w0y; az = wz - w0z; }
+      else { bx = wx - w0x; by = wy - w0y; bz = wz - w0z; }
+    }
+    pz[i] = depth / 3;
+    let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+    const nl = Math.hypot(nx, ny, nz);
+    if (nl < 1e-9) { sh[i] = -1; continue; }       // degenerate tri
+    nx /= nl; ny /= nl; nz /= nl;
+    if (nx * cam.f[0] + ny * cam.f[1] + nz * cam.f[2] > 0) {
+      nx = -nx; ny = -ny; nz = -nz;                // two-sided shading
+    }
+    sh[i] = 0.35 + 0.65 * Math.max(0, nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]);
+  }
+  for (let i = 0; i < n; i++) order[i] = i;
+  order.sort((a, b) => pz[b] - pz[a]);             // painter: far first
+  g.lineWidth = 0.6 * dpr;
+  for (let k = 0; k < n; k++) {
+    const i = order[k];
+    if (sh[i] < 0) continue;
+    const col = MODEL.cols ? MODEL.cols[i] : STL_COL;
+    const sf = sh[i];
+    const css = `rgb(${(col[0] * sf) | 0},${(col[1] * sf) | 0},${(col[2] * sf) | 0})`;
+    g.fillStyle = css; g.strokeStyle = css;
+    const o = i * 6;
+    g.beginPath();
+    g.moveTo(px[o], px[o + 1]);
+    g.lineTo(px[o + 2], px[o + 3]);
+    g.lineTo(px[o + 4], px[o + 5]);
+    g.closePath(); g.fill(); g.stroke();
+  }
+  // world NED axes triad, lower-left
+  const ox = 30 * dpr, oy = H - 24 * dpr, al = 18 * dpr;
+  const axes = [
+    { d: [0, 1, 0], lbl: "N", col: PAL.c1 },
+    { d: [1, 0, 0], lbl: "E", col: PAL.c2 },
+    { d: [0, 0, -1], lbl: "D", col: PAL.c3 }];
+  for (const a2 of axes) {
+    const sx = (a2.d[0] * cam.r[0] + a2.d[1] * cam.r[1] + a2.d[2] * cam.r[2]) * al;
+    const sy = -(a2.d[0] * cam.u[0] + a2.d[1] * cam.u[1] + a2.d[2] * cam.u[2]) * al;
+    g.strokeStyle = a2.col; g.fillStyle = a2.col; g.lineWidth = 1.3 * dpr;
+    g.beginPath(); g.moveTo(ox, oy); g.lineTo(ox + sx, oy + sy); g.stroke();
+    g.fillText(a2.lbl, ox + sx * 1.45, oy + sy * 1.45 + 3 * dpr);
+  }
+}
+
+/* --- 3D view wiring (runs when the Attitude panel is created) --- */
+setModelTris(...builtinModel(), "built-in");
+function wireAtt3d() {
+  const c = $("rocket3d");
+  let lx = 0, ly = 0;
+  c.addEventListener("pointerdown", e => {
+    VIEW.dragging = true; lx = e.clientX; ly = e.clientY;
+    c.setPointerCapture(e.pointerId);
+    c.style.cursor = "grabbing";
+  });
+  c.addEventListener("pointermove", e => {
+    if (!VIEW.dragging) return;
+    VIEW.az = (VIEW.az + (e.clientX - lx) * 0.45 + 360) % 360;
+    VIEW.el = Math.max(-85, Math.min(85, VIEW.el + (e.clientY - ly) * 0.45));
+    lx = e.clientX; ly = e.clientY;
+  });
+  const endDrag = () => { VIEW.dragging = false; c.style.cursor = "grab"; };
+  c.addEventListener("pointerup", endDrag);
+  c.addEventListener("pointercancel", endDrag);
+  c.addEventListener("wheel", e => {
+    e.preventDefault();
+    VIEW.zoom = Math.max(0.35, Math.min(3.2,
+        VIEW.zoom * Math.exp(-e.deltaY * 0.0012)));
+  }, { passive: false });
+  c.addEventListener("dblclick", resetView);
+$("btnViewReset").onclick = resetView;
+$("btnStl").onclick = () => $("stlFile").click();
+$("stlFile").onchange = async () => {
+  const file = $("stlFile").files[0];
+  if (!file) return;
+  try {
+    loadStl(await file.arrayBuffer(), file.name);
+  } catch (err) {
+    $("modelInfo").textContent = "STL: " + err.message;
+  }
+  $("stlFile").value = "";
+};
+$("btnBuiltin").onclick = () => {
+  MODEL.stlBase = null; MODEL.stlName = "";
+  setModelTris(...builtinModel(), "built-in");
+};
+$("btnNoseAxis").onclick = () => {
+  if (!MODEL.stlBase) return;
+  MODEL.axisMode = (MODEL.axisMode + 1) % AXIS_MAPS.length;
+  applyAxisMap();
+};
+$("modelInfo").textContent = `${MODEL.name} · ${MODEL.n} tris`;
+$("btnNoseAxis").disabled = !MODEL.stlBase;
+}
+
+/* ================= attitude renderers ================= */
+/* Display heading that never suffers the euler roll/yaw degeneracy: the
+   quaternion is always healthy, so read the bearing from whichever body
+   axis is well-conditioned — the nose while it has a horizontal component,
+   the body +Z axis once the vehicle is near vertical (there, "heading" IS
+   roll about the nose, and this is its stable reference). */
+function dispHeading(r) {
+  if (!r || !r.q) return null;
+  const M = quatMat(r.q);
+  const nN = M[0], nE = M[3];                 // nose (body X) in N/E
+  if (Math.hypot(nN, nE) > 0.35) {            // >~20 deg from vertical
+    return Math.atan2(nE, nN) * R2D;
+  }
+  const zN = M[2], zE = M[5];                 // body +Z projection
+  return Math.atan2(zE, zN) * R2D;
+}
+
+function drawCompass(r) {
+  const c = $("compass");
+  if (!c) return;
+  const g = fitCanvas(c);
+  const dpr = window.devicePixelRatio || 1;
+  const W = c.width, H = c.height;
+  g.clearRect(0, 0, W, H);
+  const hdgD = dispHeading(r);
+  const yaw = hdgD === null ? 0 : hdgD;      // deg, gimbal-safe
+  const pxPerDeg = W / 120;
+  g.font = `${10 * dpr}px Consolas, monospace`;
+  g.textAlign = "center";
+  for (let d = -180; d <= 540; d += 10) {
+    const rel = ((d - yaw + 540) % 360) - 180;
+    if (Math.abs(rel) > 62) continue;
+    const x = W / 2 + rel * pxPerDeg;
+    const major = d % 30 === 0;
+    g.strokeStyle = PAL.dim; g.lineWidth = dpr;
+    g.beginPath();
+    g.moveTo(x, H - (major ? 22 : 12) * dpr); g.lineTo(x, H - 4 * dpr);
+    g.stroke();
+    if (major) {
+      const dd = ((d % 360) + 360) % 360;
+      const lbl = { 0: "N", 90: "E", 180: "S", 270: "W" }[dd] || String(dd);
+      g.fillStyle = "N E S W".includes(lbl) ? PAL.text : PAL.dim;
+      g.fillText(lbl, x, H - 26 * dpr);
+    }
+  }
+  g.strokeStyle = PAL.text; g.lineWidth = 1.5 * dpr;
+  g.beginPath(); g.moveTo(W / 2, H - 24 * dpr); g.lineTo(W / 2, H - 2 * dpr);
+  g.stroke();
+  // boxed digital heading, EFIS-style
+  const hv = hdgD === null ? "---"
+      : String(Math.round((hdgD + 360) % 360) % 360).padStart(3, "0");
+  const bw = 46 * dpr, bh = 16 * dpr;
+  g.fillStyle = PAL.panel2;
+  g.fillRect(W / 2 - bw / 2, 0, bw, bh);
+  g.strokeStyle = PAL.text; g.lineWidth = dpr;
+  g.strokeRect(W / 2 - bw / 2, 0, bw, bh);
+  g.fillStyle = PAL.text; g.textAlign = "center";
+  g.fillText(hv + "°", W / 2, bh - 4.5 * dpr);
+}
+
+function niceStep(r) {
+  const raw = r / 3;
+  const p = Math.pow(10, Math.floor(Math.log10(raw)));
+  for (const m of [1, 2, 5, 10]) if (m * p >= raw) return m * p;
+  return 10 * p;
+}
+function fmtDist(m) { return m >= 1000 ? (m / 1000).toFixed(1) + "km" : m.toFixed(0) + "m"; }
+
+/* ================= record handling ================= */
+const FST = ["INIT", "ALIGN", "WAIT FIX", "RUN", "ATT ONLY"];
+const FIXNAMES = { 0: "none", 1: "DR", 2: "2D", 3: "3D", 4: "3D+DR", 5: "time" };
+
+function applyToCharts(r) {
+  const t = r._t;
+  const nn = v => (v === null || v === undefined) ? null : v;
+  charts.alt.push(t, [nn(r.ral)]);
+  charts.att.push(t, r.eul ? r.eul : [null, null, null]);
+  charts.gyr.push(t, r.gyr ? r.gyr.map(x => x * R2D) : [null, null, null]);
+  // Raw (pre-calibration) field: the rotation-test truth channel. During a
+  // slow level 360° X/Y must trace sinusoids and |m| must hold steady.
+  charts.mag.push(t, r.mgr
+    ? [r.mgr[0], r.mgr[1], r.mgr[2],
+       Math.hypot(r.mgr[0], r.mgr[1], r.mgr[2])]
+    : [null, null, null, null]);
+  // link quality, viewer-measured; rssi/snr appear when the link reports them
+  let rxHzC = null;
+  if (S.rxWall.length > 1) {
+    const dtw = (S.rxWall[S.rxWall.length - 1] - S.rxWall[0]) / 1000;
+    if (dtw > 0.2) rxHzC = (S.rxWall.length - 1) / dtw;
+  }
+  let bpsC = null;
+  if (S.byteWin.length > 1) {
+    const dtb = (S.byteWin[S.byteWin.length - 1].w - S.byteWin[0].w) / 1000;
+    if (dtb > 0.2) {
+      let sum = 0;
+      for (const e of S.byteWin) sum += e.b;
+      bpsC = sum / dtb;
+    }
+  }
+  charts.rate.push(t, [rxHzC]);
+  charts.tput.push(t, [bpsC === null ? null : bpsC / 1024]);
+  charts.loss.push(t, [S.seqGaps, nn(r.dtx)]);
+  charts.rssi.push(t, [nn(r.rssi), nn(r.snr)]);
+}
+function applyToGeo(r) {
+  if (r.lat !== null && r.lat !== undefined &&
+      r._t - S.lastGeoPush > 0.2) {
+    S.lastGeoPush = r._t;
+    S.geoTrack.push({ lat: r.lat, lon: r.lon });
+    if (S.geoTrack.length > 4000) S.geoTrack.shift();
+  }
+  if (r.glat !== null && r.glat !== undefined) {
+    const q = S.geoRaw, last = q[q.length - 1];
+    if (!last || last.lat !== r.glat || last.lon !== r.glon) {
+      q.push({ lat: r.glat, lon: r.glon });
+      if (q.length > 2000) q.shift();
+    }
+  }
+}
+
+function handleLine(line) {
+  const p = parseLine(line);
+  if (p.kind === "empty") return;
+  // whole-session raw capture (bad lines included, so a saved .jsonl
+  // reproduces exactly what came over the wire)
+  S.rawLines.push(line);
+  S.rawBytes += line.length + 1;
+  const bw = performance.now();
+  S.byteWin.push({ w: bw, b: line.length + 1 });
+  while (S.byteWin.length && bw - S.byteWin[0].w > 3000) S.byteWin.shift();
+  if (S.rawBytes > 200 * 1024 * 1024) {
+    const cut = S.rawLines.splice(0, 20000);
+    for (const l of cut) S.rawBytes -= l.length + 1;
+  }
+  if (!S.consolePaused) {
+    S.consoleLines.push(line.length > 220 ? line.slice(0, 220) + "…" : line);
+    if (S.consoleLines.length > 1000) S.consoleLines.shift();
+    S.consoleDirty = true;
+  }
+  if (p.kind === "error") { S.parseErr++; return; }
+  if (p.kind === "unknown") return;
+  if (p.kind === "hdr") { S.hdr = p.rec; updateDevice(); return; }
+  if (p.kind === "org") { S.org = p.rec; updateDevice(); return; }
+  if (p.kind === "msg") {
+    S.msgs.push(p.rec);
+    if (p.rec.txt) logCmd("< " + p.rec.txt);
+    if (S.msgs.length > 40) S.msgs.shift();
+    S.bootDirty = true;
+    return;
+  }
+  if (p.kind === "cal") { S.cal = p.rec; S.bootDirty = true; return; }
+  if (p.kind === "lcal") {
+    const q = p.rec;
+    if (q.src === 2) S.lcal.stage = (q.fin >= 0) ? q : null;
+    else if (q.fin >= 0 && q.fin < 4) S.lcal.fins[q.fin] = q;
+    renderLcalPoints();
+    return;
+  }
+  const r = p.rec;
+  S.recCount++;
+  const wall = performance.now();
+  S.lastRxWall = wall;
+  S.rxWall.push(wall);
+  while (S.rxWall.length && wall - S.rxWall[0] > 2000) S.rxWall.shift();
+  if (S.lastSeq !== null && r.seq > S.lastSeq + 1) S.seqGaps += r.seq - S.lastSeq - 1;
+  S.lastSeq = r.seq;
+  if (S.t0_us === null) S.t0_us = r.us;
+  r._t = (r.us - S.t0_us) / 1e6;
+  S.last = r;
+  if (r.ral !== null && r.ral !== undefined &&
+      (S.maxRal === null || r.ral > S.maxRal)) {
+    S.maxRal = r.ral; S.maxRalT = r._t;
+  }
+  if (r.acc) {
+    const am = Math.hypot(r.acc[0], r.acc[1], r.acc[2]);
+    if (S.maxAcc === null || am > S.maxAcc) S.maxAcc = am;
+  }
+  S.session.push(r);
+  if (S.session.length > 250000) S.session.splice(0, 25000);
+  if (!S.paused) { applyToCharts(r); applyToGeo(r); }
+}
+
+/* ================= pause / scrollback ================= */
+/* While paused, incoming data still lands in S.session / S.rawLines; only
+   the display freezes. Scrubbing rebuilds chart windows + ground track from
+   the session buffer at the selected record. */
+function rebuildAt(tEnd) {
+  for (const k in charts) charts[k].clear();
+  S.geoTrack = []; S.lastGeoPush = -1; S.geoRaw = [];
+  const tLo = tEnd - 15;
+  for (const r of S.session) {
+    if (r._t > tEnd) break;
+    applyToGeo(r);
+    if (r._t >= tLo) applyToCharts(r);
+  }
+}
+function setPaused(on) {
+  S.paused = on;
+  const sc = $("scrub");
+  $("btnPause").textContent = on ? "Resume" : "Pause";
+  sc.disabled = !on;
+  if (on && S.session.length) {
+    sc.max = S.session.length - 1;
+    sc.value = sc.max;
+    S.view = S.session[S.session.length - 1];
+  } else {
+    S.view = null;
+    if (S.last) rebuildAt(S.last._t);   // restore live window + full track
+  }
+  updateScrubLbl();
+}
+function updateScrubLbl() {
+  if (!S.paused || !S.view) { $("scrubLbl").innerHTML = "live"; return; }
+  const i = Number($("scrub").value);
+  $("scrubLbl").innerHTML =
+    `rec <b>${i + 1}</b>/${Number($("scrub").max) + 1} · t=<b>${S.view._t.toFixed(2)}</b> s`;
+}
+$("btnPause").onclick = () => setPaused(!S.paused);
+$("scrub").oninput = () => {
+  if (!S.paused) return;
+  const i = Math.min(Number($("scrub").value), S.session.length - 1);
+  if (i < 0) return;
+  S.view = S.session[i];
+  rebuildAt(S.view._t);
+  updateScrubLbl();
+};
+
+/* ================= DOM update (throttled by rAF loop) =================
+   T()/HT() null-guard every write so tab layout changes can't crash. */
+const T = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+/* Terminal-style log writer: follow the tail while the user sits at the
+   bottom; the moment they scroll up to read, hold their place. Tracked via
+   scroll events (not measured pre-write) so a tab that was display:none -
+   where heights read 0 - re-pins correctly on its next write. */
+const pinLog = (el, text) => {
+  if (el._follow === undefined) {
+    el._follow = true;
+    el.addEventListener("scroll", () => {
+      el._follow = el.scrollHeight - el.scrollTop - el.clientHeight < 16;
+    });
+  }
+  el.textContent = text;
+  if (el._follow) el.scrollTop = el.scrollHeight;
+};
+const HT = (id, v) => { const e = $(id); if (e) e.innerHTML = v; };
+function chip(label, on, cls) {
+  return `<span class="chip ${on ? cls : ""}">${label}</span>`;
+}
+function healthChips(bits) {
+  if (bits === undefined || bits === null) return "";
+  const b = bits | 0;
+  let h = "";
+  h += chip("present", b & 1, "ok");
+  h += chip((b & 2) ? "fresh" : "idle", b & 2, "ok");
+  if (b & 4) h += chip("STALE", 1, "warn");
+  if (b & 8) h += chip("SAT", 1, "warn");
+  if (b & 16) h += chip("STUCK", 1, "bad");
+  if (b & 32) h += chip("FAULT", 1, "bad");
+  return h;
+}
+function vec(v, d) { return v ? v.map(x => fmt(x, d)).join("  ") : "—"; }
+
+function updateDevice() {
+  const h = S.hdr;
+  if (h) {
+    HT("dBoot",
+      chip("imu", h.imu, h.imu ? "ok" : "bad") + chip("mag", h.mag, h.mag ? "ok" : "bad") +
+      chip("baro", h.bar, h.bar ? "ok" : "bad") + chip("gps", h.gps, h.gps ? "ok" : "bad"));
+    T("dImu", `${h.iodr} Hz · ±${h.afs} g · ±${h.gfs} dps`);
+    T("dMagBar", `${h.modr} Hz ${h.mmode} / ${h.bhz} Hz`);
+    T("dGnss", `${h.gmode} ${h.ghz} Hz / ${h.ohz} Hz out`);
+    T("dFw", `${h.fw} / sch ${h.sch}`);
+  }
+  const o = S.org;
+  if (o) {
+    T("dOrg", `${o.lat.toFixed(7)}, ${o.lon.toFixed(7)} @ ${fmt(o.alt, 1)} m`);
+    T("dOrg2",
+      `hae ${fmt(o.hae, 1)} m · g₀ ${fmt(o.g0, 4)} · ${fmt(o.p0, 0)} Pa ${fmt(o.t0, 1)} °C`);
+  }
+}
+
+function updateDom() {
+  const r = S.paused ? S.view : S.last;
+
+  const active = S.connected || S.sim;
+  const age = (active && S.lastRxWall) ? (performance.now() - S.lastRxWall) / 1000 : null;
+  const stale = age !== null && age > 2 && !S.paused;
+  $("staleBar").style.display = stale ? "" : "none";
+  if (stale) $("staleAge").textContent = age.toFixed(0);
+  document.body.classList.toggle("stale", stale);
+  $("btnJsonl").disabled = S.rawLines.length === 0;
+  $("btnCsv").disabled = S.session.length === 0;
+
+  let rxHz = null;
+  if (S.rxWall.length > 1) {
+    const dt = (S.rxWall[S.rxWall.length - 1] - S.rxWall[0]) / 1000;
+    if (dt > 0.2) rxHz = (S.rxWall.length - 1) / dt;
+  }
+  HT("bRx", `rx <b>${fmt(rxHz, 1)}</b> Hz`);
+  const bA = $("bAge");
+  bA.innerHTML = `age <b>${age === null ? "—" : age.toFixed(age < 10 ? 2 : 0) + " s"}</b>`;
+  bA.className = "badge" + (age !== null && age > 2 ? " bad" : "");
+  HT("bRec", `recs <b>${S.recCount}</b>`);
+  HT("bErr", `err <b>${S.parseErr}</b>`);
+  if (S.hdr) HT("bFw", `<b>${S.hdr.fw}</b> sch${S.hdr.sch} · fw`);
+  if (S.hdr) {
+    HT("bMag", `mag <b>${S.hdr.mmode}</b>` +
+      (S.hdr.gmode ? ` · gps <b>${S.hdr.gmode}</b>` : ""));
+  }
+  T("hRecs", `${S.recCount} / ${S.parseErr}`);
+  T("hRx", rxHz === null ? "—" : `${rxHz.toFixed(1)} Hz`);
+
+  // Comms tab link panel
+  T("cLink", S.connected ? "USB serial · 921 600 Bd"
+           : S.sim ? "demo" : "—");
+  T("cRate", rxHz === null ? "—" : rxHz.toFixed(1) + " Hz");
+  let bps = null;
+  if (S.byteWin.length > 1) {
+    const dtb = (S.byteWin[S.byteWin.length - 1].w - S.byteWin[0].w) / 1000;
+    if (dtb > 0.2) {
+      let sum = 0;
+      for (const e of S.byteWin) sum += e.b;
+      bps = sum / dtb;
+    }
+  }
+  T("cTput", bps === null ? "—"
+      : bps >= 1024 ? (bps / 1024).toFixed(1) + " kB/s"
+                    : bps.toFixed(0) + " B/s");
+  T("cBytes", S.rawBytes >= 1048576
+      ? (S.rawBytes / 1048576).toFixed(2) + " MB"
+      : (S.rawBytes / 1024).toFixed(1) + " kB");
+  T("cRecs", `${S.recCount} · ${S.parseErr} err`);
+  const lossP = (S.recCount + S.seqGaps) > 0
+      ? 100 * S.seqGaps / (S.recCount + S.seqGaps) : null;
+  T("cLoss", lossP === null ? "—" : `${S.seqGaps} (${lossP.toFixed(2)}%)`);
+  T("cAge", age === null ? "—" : age.toFixed(2) + " s");
+  const rr0 = S.paused ? S.view : S.last;
+  T("cDtx", rr0 ? String(rr0.dtx) : "—");
+  T("cRssi", rr0 && rr0.rssi !== undefined && rr0.rssi !== null
+      ? fmt(rr0.rssi, 0) + " dBm" : "—");
+  T("cSnr", rr0 && rr0.snr !== undefined && rr0.snr !== null
+      ? fmt(rr0.snr, 1) + " dB" : "—");
+
+  if (S.bootDirty && ($("bootLog") || $("calBg"))) {
+    S.bootDirty = false;
+    const esc = t => t.replace(/[&<>]/g,
+        ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
+    HT("bootLog", S.msgs.slice(-10).map(m => {
+      const bad = /NOT FOUND|DEGRADED|not responding/.test(m.txt);
+      return `<div${bad ? ' class="err"' : ""}><span class="bt">` +
+             `${(m.us / 1e6).toFixed(1)}s</span>${esc(m.txt)}</div>`;
+    }).join(""));
+    const cc = S.cal;
+    T("calBg", cc && cc.bg ? cc.bg.map(x => fmt(x, 3)).join("  ") : "—");
+    T("calEul", cc && cc.eul ? cc.eul.map(x => fmt(x, 1)).join("  ") : "—");
+    T("calDur", cc ? `${fmt(cc.dur, 1)} s · ${cc.alq ? "clean" : "DEGRADED"}` : "—");
+  }
+
+  const lnk = $("bLnk");
+  if (S.connected) {
+    const eff = (S.hdr && S.hdr.mode === "lora") ? "lora" : "usb";
+    lnk.innerHTML = `link <b>${eff === "lora" ? "LoRa" : "USB"}</b>`;
+    // red when the stream contradicts the selector (wrong port picked)
+    lnk.classList.toggle("bad", eff !== S.linkPref);
+  } else {
+    lnk.innerHTML = `link <b>${S.linkPref === "lora" ? "LoRa" : "USB"}</b>`;
+    lnk.classList.remove("bad");
+  }
+
+  const CMN = ["idle", "ARMED", "ACTIVE", "safe", "BENCH"];
+  const cbdg = $("bCtl");
+  if (r && r.cmode !== undefined && r.cmode !== null) {
+    cbdg.innerHTML = `ctl <b>${CMN[r.cmode] || r.cmode}</b>`;
+    // ARMED/ACTIVE/BENCH all drive canards live -> red badge.
+    cbdg.classList.toggle("bad", r.cmode === 1 || r.cmode === 2 || r.cmode === 4);
+  } else {
+    cbdg.innerHTML = "ctl <b>&mdash;</b>";
+    cbdg.classList.remove("bad");
+  }
+  T("ctlModeRo", r && r.cmode !== undefined && r.cmode !== null
+      ? (CMN[r.cmode] || String(r.cmode)) : "\u2014");
+  T("ctlDeflRo", r && r.cdef ? r.cdef.map(v => fmt(v, 1)).join(" / ")
+                             : "\u2014");
+
+  const st = $("bState");
+  if (r) {
+    st.innerHTML = `state <b>${FST[r.fst] || r.fst}</b>${S.paused ? " ⏸" : ""}`;
+  } else {
+    st.innerHTML = `state <b>${active ? "waiting" : "—"}</b>`;
+  }
+  if (!r) return;
+  HT("bFhz", `filter <b>${fmt(r.fhz, 0)}</b> Hz`);
+  HT("bGrz", `gnss <b>${fmt(r.grz, 1)}</b> Hz`);
+  HT("bDrop", `drops <b>${(r.dtx || 0) + S.seqGaps}</b>`);
+  const bs = r.us / 1e6;
+  HT("bBoot", `boot t+ <b>${Math.floor(bs / 60)}:` +
+      `${(bs % 60).toFixed(1).padStart(4, "0")}</b>`);
+
+  // readout cards
+  T("roLat", r.lat === null ? "—" : r.lat.toFixed(7) + "°");
+  T("roLatS", r.p ? `N ${fmt(r.p[0], 1)} m` : "");
+  T("roLon", r.lon === null ? "—" : r.lon.toFixed(7) + "°");
+  T("roLonS", r.p ? `E ${fmt(r.p[1], 1)} m` : "");
+  const hasAgl = r.ral !== null && r.ral !== undefined;
+  T("roAgl", hasAgl ? fmt(r.ral, 1) + " m" : "—");
+  T("roAglS", hasAgl ? `±${fmt(r.sra, 2)} m (1σ) baro-fused` : "");
+  T("roAlt", r.alt === null ? "—" : fmt(r.alt, 1) + " m");
+  T("roAltS", r.sp ? `±${fmt(r.sp[2], 2)} m (1σ)` : "");
+  const vsUp = (r.rvs !== null && r.rvs !== undefined) ? r.rvs
+             : (r.v ? -r.v[2] : null);
+  T("roVs", vsUp === null ? "—" : fmt(vsUp, 1) + " m/s");
+  T("roVsS", (r.srv !== null && r.srv !== undefined)
+      ? `±${fmt(r.srv, 2)} m/s (1σ)` : "");
+  const spd = r.v ? Math.hypot(r.v[0], r.v[1], r.v[2]) : null;
+  T("roSpd", spd === null ? "—" : fmt(spd, 1) + " m/s");
+  T("roSpdS", r.sv ? `±${fmt(Math.max(...r.sv), 2)} m/s (1σ)` : "");
+  T("roApo", S.maxRal === null ? "—" : fmt(S.maxRal, 1) + " m");
+  T("roApoS", S.maxRal === null ? "" : `at T+${fmt(S.maxRalT, 1)} s`);
+  const lv = MAP.live;
+  T("roPad", lv ? fmtDist(lv.dist) : "—");
+  T("roPadS", lv ? `brg ${lv.brg.toFixed(0)}° · pad ${MAP.anchor.src}`
+                 : (MAP.anchor ? `pad ${MAP.anchor.src} set` : "no pad set"));
+  T("roYaw", r.eul ? fmt((r.eul[2] + 360) % 360, 1) + "°" : "—");
+  T("roYawS", r.sa ? `±${fmt(r.sa[2], 2)}° (1σ)` : "");
+  T("roRp", r.eul ? `${fmt(r.eul[0], 1)}° / ${fmt(r.eul[1], 1)}°` : "—");
+  T("euRoll", r.eul ? fmt(r.eul[0], 1) + "°" : "—");
+  T("euPitch", r.eul ? fmt(r.eul[1], 1) + "°" : "—");
+  T("euYaw", r.eul ? fmt((r.eul[2] + 360) % 360, 1) + "°" : "—");
+  T("roRpS", r.sa ? `±${fmt(r.sa[0], 2)}° / ±${fmt(r.sa[1], 2)}°` : "");
+  T("roVned", r.v ? r.v.map(x => fmt(x, 2)).join("  ") : "—");
+  T("roVnedS", r.sv ? `±${r.sv.map(x => fmt(x, 2)).join(" ")}` : "");
+  T("roBb", r.bb === null ? "—" : fmt(r.bb, 2) + " m");
+
+  // map coordinates + copy targets
+  let cla = null, clo = null;
+  if (r.lat !== null && r.lat !== undefined) { cla = r.lat; clo = r.lon; }
+  else if (r.glat !== null && r.glat !== undefined) { cla = r.glat; clo = r.glon; }
+  MAP.copyPos = cla === null ? null : { lat: cla, lon: clo };
+  T("mapCoords", cla === null ? "—"
+      : `${cla.toFixed(7)}, ${clo.toFixed(7)}`);
+  const bc = $("btnCopyPos"), bm = $("btnGmaps");
+  if (bc) bc.disabled = cla === null;
+  if (bm) bm.disabled = cla === null;
+
+  // tables (guarded — only the visible tab's are in the DOM either way)
+  T("aQ", r.q ? r.q.map(x => fmt(x, 4)).join("  ") : "—");
+  T("aSa", vec(r.sa, 2));
+  T("fSp", vec(r.sp, 2));
+  T("fSv", vec(r.sv, 2));
+  T("fPn", vec(r.p, 1));
+  const nf = (n, k) => (n === null || n === undefined) ? "—"
+      : n.toFixed(1) + (k === 0 ? "✗" : "");
+  T("fNis", [nf(r.ngp, r.kgp), nf(r.ngv, r.kgv),
+             nf(r.nmg, r.kmg), nf(r.nbr, r.kbr)].join("  "));
+  T("fIgp", vec(r.igp, 2));
+  T("fIgv", vec(r.igv, 2));
+  T("fImg", (r.img === null || r.img === undefined) ? "—" : fmt(r.img, 2) + " µT");
+  T("fIbr", (r.ibr === null || r.ibr === undefined) ? "—" : fmt(r.ibr, 2) + " m");
+  HT("hImu", healthChips(r.himu));
+  HT("hMag", healthChips(r.hmag));
+  HT("hBar", healthChips(r.hbar));
+  HT("hGps", healthChips(r.hgps));
+  T("hDrops", `imu ${r.dimu}  mag ${r.dmag}  bar ${r.dbar}  gps ${r.dgps}`);
+  T("hI2c", `${r.ei2c} / ${r.ri2c}`);
+  T("hDtx", `${r.dtx} / ${S.seqGaps}`);
+  T("hLmx", r.lmx + " µs");
+  T("hAlq", r.alq ? "clean static" : "DEGRADED");
+
+  T("sAcc", vec(r.acc, 2));
+  T("sGyr", r.gyr ? r.gyr.map(x => fmt(x * R2D, 2)).join("  ") : "—");
+  T("sMag", vec(r.mag, 1));
+  T("sMagR", vec(r.mgr, 1));
+  if (!r.mag) T("sMagD", "—");  // |B|/incl detail: 2 Hz updater below
+  T("sBaro", (r.pa !== null && r.pa !== undefined)
+    ? `${fmt(r.pa, 0)} Pa  ${fmt(r.tc, 1)} °C` : "—");
+  T("sBg", r.bg ? r.bg.map(x => fmt(x * R2D, 3)).join("  ") : "—");
+  T("sBa", vec(r.ba, 3));
+
+  T("gFix", r.gfix === null ? "—"
+    : `${FIXNAMES[r.gfix] || r.gfix} / ${r.gsv} sats`);
+  T("gAcc", r.ghac === null ? "—"
+    : `${fmt(r.ghac, 1)} / ${fmt(r.gvac, 1)} m · ${fmt(r.gsac, 2)} m/s`);
+  T("gPos", r.glat === null ? "—"
+    : `${r.glat.toFixed(7)}, ${r.glon.toFixed(7)}`);
+  T("gAlt", r.galt === null ? "—" : fmt(r.galt, 1) + " m");
+  T("gAge", r.gage === null ? "—" : fmt(r.gage, 2) + " s");
+  T("gRate", r.grz === null ? "—" : fmt(r.grz, 1) + " Hz");
+
+  if (S.consoleDirty) {
+    S.consoleDirty = false;
+    pinLog($("console"), S.consoleLines.join("\n"));
+  }
+}
+
+/* Field |B|/inclination detail (kept out of the hot path above). */
+setInterval(() => {
+  const r = S.paused ? S.view : S.last;
+  if (r && r.mag) {
+    const B = Math.hypot(r.mag[0], r.mag[1], r.mag[2]);
+    // inclination needs the field in NED: rotate body vector by attitude.
+    let incl = null;
+    if (r.q) {
+      const M = quatMat(r.q), m = r.mag;
+      const nN = M[0] * m[0] + M[1] * m[1] + M[2] * m[2];
+      const nE = M[3] * m[0] + M[4] * m[1] + M[5] * m[2];
+      const nD = M[6] * m[0] + M[7] * m[1] + M[8] * m[2];
+      incl = Math.atan2(nD, Math.hypot(nN, nE)) * R2D;
+    }
+    T("sMagD", `${B.toFixed(1)} µT · incl ${incl === null ? "—" : incl.toFixed(1) + "°"}`);
+  }
+}, 500);
+
+/* ================= satellite map =================
+   Hand-rolled Web-Mercator tile map, no libraries. Tiles stream from the
+   Esri World Imagery REST service (the file's one network dependency);
+   offline, tiles simply don't arrive and a labeled grid shows instead. */
+const MAP = { z: 17, lat: null, lon: null, centerMode: "pad",
+              anchor: null,                 // {lat, lon, src: auto|org|manual}
+              setPadArmed: false, dragging: false,
+              tiles: new Map(), inflight: 0 };
+const TILE_URL = (z, x, y) =>
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/" +
+  `MapServer/tile/${z}/${y}/${x}`;
+const lon2tx = (lon, z) => (lon + 180) / 360 * (1 << z);
+const lat2ty = (lat, z) => {
+  const sl = Math.sin(lat * D2R);
+  return (0.5 - Math.log((1 + sl) / (1 - sl)) / (4 * Math.PI)) * (1 << z);
+};
+const tx2lon = (tx, z) => tx / (1 << z) * 360 - 180;
+const ty2lat = (ty, z) =>
+  Math.atan(Math.sinh(Math.PI * (1 - 2 * ty / (1 << z)))) * R2D;
+function tileGet(z, x, y) {
+  const n = 1 << z;
+  x = ((x % n) + n) % n;
+  if (y < 0 || y >= n) return null;
+  const key = z + "/" + x + "/" + y;
+  const e = MAP.tiles.get(key);
+  if (e) {
+    if (e.img) return e.img;
+    if (!e.bad || performance.now() - e.bad < 30000) return null;
+    MAP.tiles.delete(key);              // failed a while ago: retry below
+  }
+  if (MAP.inflight >= 8) return null;
+  MAP.inflight++;
+  const ent = { img: null, bad: 0 };
+  const img = new Image();
+  img.onload = () => { ent.img = img; MAP.inflight--; };
+  img.onerror = () => { ent.bad = performance.now(); MAP.inflight--; };
+  img.src = TILE_URL(z, x, y);
+  MAP.tiles.set(key, ent);
+  if (MAP.tiles.size > 300) {
+    for (const k of MAP.tiles.keys()) {
+      if (MAP.tiles.size <= 260) break;
+      const v = MAP.tiles.get(k);
+      if (v.img || v.bad) MAP.tiles.delete(k);   // never drop in-flight
+    }
+  }
+  return null;
+}
+function drawMap(r) {
+  const c = $("map");
+  if (!c) return;
+  const g = fitCanvas(c);
+  const dpr = window.devicePixelRatio || 1;
+  const W = c.width, H = c.height;
+  g.fillStyle = "#0a0d12";
+  g.fillRect(0, 0, W, H);
+  g.font = `${10 * dpr}px Consolas, monospace`;
+  // live position: estimate first, else raw GNSS
+  let plat = null, plon = null, hdg = null;
+  if (r) {
+    if (r.lat !== null && r.lat !== undefined) { plat = r.lat; plon = r.lon; }
+    else if (r.glat !== null && r.glat !== undefined) {
+      plat = r.glat; plon = r.glon;
+    }
+    if (r.eul) hdg = r.eul[2];
+  }
+  // pad anchor + live distance are maintained by updatePadAnchor() every
+  // frame (the map panel may not even exist); drawMap only renders them.
+  const anc = MAP.anchor;
+  if (MAP.centerMode === "pad" && anc) { MAP.lat = anc.lat; MAP.lon = anc.lon; }
+  else if (MAP.centerMode === "live" && plat !== null) {
+    MAP.lat = plat; MAP.lon = plon;
+  }
+  if (MAP.lat === null) {
+    const mi0 = $("mapInfo"), pi0 = $("padInfo");
+    if (mi0) mi0.textContent = "—";
+    if (pi0) pi0.textContent = "—";
+    return;
+  }
+  const z = MAP.z, tpx = 256 * dpr;
+  const cx = lon2tx(MAP.lon, z), cy = lat2ty(MAP.lat, z);
+  const gx0 = cx * tpx - W / 2, gy0 = cy * tpx - H / 2;
+  MAP._gx0 = gx0; MAP._gy0 = gy0; MAP._tpx = tpx;  // for click-to-set-pad
+  const toX = lon => lon2tx(lon, z) * tpx - gx0;
+  const toY = lat => lat2ty(lat, z) * tpx - gy0;
+  let drawn = 0, missing = 0;
+  const i0 = Math.floor(gx0 / tpx), i1 = Math.floor((gx0 + W) / tpx);
+  const j0 = Math.floor(gy0 / tpx), j1 = Math.floor((gy0 + H) / tpx);
+  for (let j = j0; j <= j1; j++) {
+    for (let i = i0; i <= i1; i++) {
+      const px = i * tpx - gx0, py = j * tpx - gy0;
+      const img = tileGet(z, i, j);
+      if (img) {
+        g.drawImage(img, px, py, tpx, tpx);
+        drawn++;
+      } else {
+        missing++;
+        g.strokeStyle = "#1c2434";
+        g.strokeRect(px, py, tpx, tpx);
+      }
+    }
+  }
+  // metric overlay at the pad: range rings + crosshair (Web-Mercator scale
+  // at the pad latitude, so ring radii are true meters on the ground)
+  if (anc) {
+    const pxPerM = tpx * (1 << z) / (40075016.686 * Math.cos(anc.lat * D2R));
+    const ax = toX(anc.lon), ay = toY(anc.lat);
+    const maxM = Math.hypot(W, H) / 2 / pxPerM;
+    const step = niceStep(maxM);
+    g.textAlign = "left";
+    for (let rr = step, k = 0; rr <= maxM && k < 8; rr += step, k++) {
+      g.strokeStyle = "rgba(215,224,238,0.30)"; g.lineWidth = dpr;
+      g.beginPath(); g.arc(ax, ay, rr * pxPerM, 0, 7); g.stroke();
+      const lx = ax + rr * pxPerM * Math.SQRT1_2 + 3 * dpr;
+      const ly = ay - rr * pxPerM * Math.SQRT1_2 - 3 * dpr;
+      g.fillStyle = "rgba(215,224,238,0.75)";
+      g.fillText(fmtDist(rr), lx, ly);
+    }
+    g.strokeStyle = "#e05252"; g.lineWidth = 1.6 * dpr;
+    g.beginPath();
+    g.moveTo(ax - 9 * dpr, ay); g.lineTo(ax + 9 * dpr, ay);
+    g.moveTo(ax, ay - 9 * dpr); g.lineTo(ax, ay + 9 * dpr);
+    g.stroke();
+    g.fillStyle = "#e05252";
+    g.fillText("PAD", ax + 6 * dpr, ay - 6 * dpr);
+  }
+  // estimated path, then raw GNSS dots
+  if (S.geoTrack.length > 1) {
+    g.strokeStyle = "#4da3ff"; g.lineWidth = 1.8 * dpr;
+    g.beginPath();
+    g.moveTo(toX(S.geoTrack[0].lon), toY(S.geoTrack[0].lat));
+    for (const p of S.geoTrack) g.lineTo(toX(p.lon), toY(p.lat));
+    g.stroke();
+  }
+  g.fillStyle = "rgba(215,224,238,0.55)";
+  for (const p of S.geoRaw) {
+    const x = toX(p.lon), y = toY(p.lat);
+    if (x < 0 || x > W || y < 0 || y > H) continue;
+    g.fillRect(x - dpr, y - dpr, 2 * dpr, 2 * dpr);
+  }
+  // live marker: 1-sigma ellipse, heading arrow, dot
+  if (plat !== null) {
+    const x = toX(plon), y = toY(plat);
+    if (r && r.sp) {
+      const pxPerM = tpx * (1 << z) / (40075016.686 * Math.cos(plat * D2R));
+      g.strokeStyle = "rgba(77,163,255,0.6)"; g.lineWidth = dpr;
+      g.beginPath();
+      g.ellipse(x, y, Math.max(2, r.sp[1] * pxPerM),
+                Math.max(2, r.sp[0] * pxPerM), 0, 0, 7);
+      g.stroke();
+    }
+    if (hdg !== null) {
+      const a = hdg * D2R;
+      g.strokeStyle = "#ffd34d"; g.lineWidth = 2 * dpr;
+      g.beginPath();
+      g.moveTo(x, y);
+      g.lineTo(x + Math.sin(a) * 16 * dpr, y - Math.cos(a) * 16 * dpr);
+      g.stroke();
+    }
+    g.fillStyle = "#ffd34d";
+    g.beginPath(); g.arc(x, y, 4 * dpr, 0, 7); g.fill();
+    g.strokeStyle = "#0a0d12"; g.lineWidth = 1.5 * dpr;
+    g.beginPath(); g.arc(x, y, 4 * dpr, 0, 7); g.stroke();
+  }
+  g.textAlign = "right"; g.fillStyle = "rgba(215,224,238,0.6)";
+  g.fillText("Esri World Imagery", W - 5 * dpr, H - 5 * dpr);
+  const mi = $("mapInfo");
+  if (mi) mi.textContent = `z${z} · ${MAP.lat.toFixed(5)}, ${MAP.lon.toFixed(5)}`;
+  const pi = $("padInfo");
+  if (pi) {
+    pi.textContent = (anc && MAP.live)
+        ? `pad ${anc.src} · ${fmtDist(MAP.live.dist)} @ ${MAP.live.brg.toFixed(0)}°`
+        : anc ? `pad ${anc.src}` : "—";
+  }
+}
+
+/* Pad anchor + live pad vector, independent of the map panel's existence
+   (the FROM PAD metric needs it even with no map on screen). Manual pad
+   sticks; the filter origin upgrades an auto anchor; auto = first position
+   seen, so the pad exists even before the origin anchors. */
+function updatePadAnchor(r) {
+  let plat = null, plon = null;
+  if (r) {
+    if (r.lat !== null && r.lat !== undefined) { plat = r.lat; plon = r.lon; }
+    else if (r.glat !== null && r.glat !== undefined) {
+      plat = r.glat; plon = r.glon;
+    }
+  }
+  if (S.org && (!MAP.anchor || MAP.anchor.src === "auto")) {
+    MAP.anchor = { lat: S.org.lat, lon: S.org.lon, src: "org" };
+  } else if (!MAP.anchor && plat !== null) {
+    MAP.anchor = { lat: plat, lon: plon, src: "auto" };
+  }
+  const anc = MAP.anchor;
+  if (anc && plat !== null) {
+    const dN = (plat - anc.lat) * 111320;
+    const dE = (plon - anc.lon) * 111320 * Math.cos(anc.lat * D2R);
+    MAP.live = { dist: Math.hypot(dN, dE),
+                 brg: (Math.atan2(dE, dN) * R2D + 360) % 360 };
+  } else {
+    MAP.live = null;
+  }
+}
+function wireMapPanel() {
+  const c = $("map");
+  let lx = 0, ly = 0, moved = 0;
+  const setCenter = m => {
+    MAP.centerMode = m;
+    $("btnCenter").textContent = "Center: " + m;
+  };
+  c.addEventListener("pointerdown", e => {
+    MAP.dragging = true; moved = 0; lx = e.clientX; ly = e.clientY;
+    c.setPointerCapture(e.pointerId);
+    c.style.cursor = "grabbing";
+  });
+  c.addEventListener("pointermove", e => {
+    if (!MAP.dragging || MAP.lat === null) return;
+    const dx = e.clientX - lx, dy = e.clientY - ly;
+    moved += Math.abs(dx) + Math.abs(dy);
+    if (moved <= 4) return;               // still a click, not a drag
+    setCenter("free");
+    const dpr = window.devicePixelRatio || 1, tpx = 256 * dpr;
+    lx = e.clientX; ly = e.clientY;
+    MAP.lon = tx2lon(lon2tx(MAP.lon, MAP.z) - dx * dpr / tpx, MAP.z);
+    MAP.lat = ty2lat(lat2ty(MAP.lat, MAP.z) - dy * dpr / tpx, MAP.z);
+  });
+  const end = e => {
+    if (MAP.dragging && MAP.setPadArmed && moved <= 4 && MAP._tpx) {
+      const rect = c.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const px = (e.clientX - rect.left) * dpr;
+      const py = (e.clientY - rect.top) * dpr;
+      MAP.anchor = { lat: ty2lat((MAP._gy0 + py) / MAP._tpx, MAP.z),
+                     lon: tx2lon((MAP._gx0 + px) / MAP._tpx, MAP.z),
+                     src: "manual" };
+      MAP.setPadArmed = false;
+      $("btnSetPad").textContent = "Set pad";
+      setCenter("pad");
+    }
+    MAP.dragging = false;
+    c.style.cursor = "grab";
+  };
+  c.addEventListener("pointerup", end);
+  c.addEventListener("pointercancel", end);
+  c.addEventListener("wheel", e => {
+    e.preventDefault();
+    MAP.z = Math.max(3, Math.min(19, MAP.z + (e.deltaY < 0 ? 1 : -1)));
+  }, { passive: false });
+  c.addEventListener("dblclick", () => setCenter("pad"));
+  $("btnCenter").onclick = () =>
+      setCenter(MAP.centerMode === "pad" ? "live" : "pad");
+  $("btnSetPad").onclick = () => {
+    MAP.setPadArmed = !MAP.setPadArmed;
+    $("btnSetPad").textContent = MAP.setPadArmed ? "click map…" : "Set pad";
+  };
+  $("btnPadHere").onclick = () => {
+    const r = S.paused ? S.view : S.last;
+    let la = null, lo = null;
+    if (r) {
+      if (r.lat !== null && r.lat !== undefined) { la = r.lat; lo = r.lon; }
+      else if (r.glat !== null && r.glat !== undefined) {
+        la = r.glat; lo = r.glon;
+      }
+    }
+    if (la === null) return;
+    MAP.anchor = { lat: la, lon: lo, src: "manual" };
+    setCenter("pad");
+  };
+  $("btnMapIn").onclick = () => { MAP.z = Math.min(19, MAP.z + 1); };
+  $("btnMapOut").onclick = () => { MAP.z = Math.max(3, MAP.z - 1); };
+  $("btnCopyPos").onclick = async () => {
+    if (!MAP.copyPos) return;
+    const txt = `${MAP.copyPos.lat.toFixed(7)}, ${MAP.copyPos.lon.toFixed(7)}`;
+    try {
+      await navigator.clipboard.writeText(txt);
+      $("btnCopyPos").textContent = "Copied";
+      setTimeout(() => { const b = $("btnCopyPos"); if (b) b.textContent = "Copy"; }, 1200);
+    } catch (e) {}
+  };
+  $("btnGmaps").onclick = () => {
+    if (!MAP.copyPos) return;
+    window.open("https://www.google.com/maps?q=" +
+        `${MAP.copyPos.lat.toFixed(7)},${MAP.copyPos.lon.toFixed(7)}`, "_blank");
+  };
+}
+
+/* ================= theme ================= */
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  const bt = $("btnTheme");
+  if (bt) bt.textContent = t === "light" ? "Dark" : "Light";
+  try { localStorage.setItem("rnTheme", t); } catch (e) {}
+  refreshPal();
+}
+(() => {
+  let t = null;
+  try { t = localStorage.getItem("rnTheme"); } catch (e) {}
+  if (t !== "light" && t !== "dark") {
+    t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  }
+  applyTheme(t);
+})();
+$("btnTheme").onclick = () =>
+    applyTheme(document.documentElement.dataset.theme === "light"
+               ? "dark" : "light");
+
+/* ================= fixed wiring + tabs ================= */
+wireAtt3d();
+wireMapPanel();
+wireConsole();
+updateDevice();
+(() => {
+  const tabs = document.querySelectorAll("#tabs .tab");
+  const show = name => {
+    for (const b of tabs) b.classList.toggle("on", b.dataset.page === name);
+    for (const p of document.querySelectorAll(".page")) {
+      p.classList.toggle("on", p.id === "pg-" + name);
+    }
+    for (const id of ["console", "cmdLog"]) {
+      const e2 = $(id);
+      if (e2 && e2._follow !== false) e2.scrollTop = e2.scrollHeight;
+    }
+    try { localStorage.setItem("rnTab", name); } catch (e) {}
+  };
+  for (const b of tabs) b.onclick = () => show(b.dataset.page);
+  let t = null;
+  try { t = localStorage.getItem("rnTab"); } catch (e) {}
+  show(["main", "ctrl", "comms"].includes(t) ? t : "main");
+})();
+
+/* ================= ground commands ================= */
+const CMDLOG = [];
+function logCmd(t) {
+  CMDLOG.push(t);
+  if (CMDLOG.length > 400) CMDLOG.shift();
+  const el = $("cmdLog");
+  if (el) pinLog(el, CMDLOG.join("\n"));
+}
+/* Sends are chained on one promise so two rapid UI events never race for
+   getWriter() (the second used to throw and silently drop its command),
+   and releaseLock lives in a finally so a rejected write can never leave
+   port.writable locked — that lock-leak bricked every later command,
+   Disarm included, until reconnect. */
+let txChain = Promise.resolve();
+function sendCmd(line) {
+  logCmd("> " + line);
+  if (S.sim) { logCmd("< sim (no device)"); return; }
+  if (!S.connected || !port || !port.writable) {
+    logCmd("< not connected");
+    return;
+  }
+  txChain = txChain.then(async () => {
+    if (!S.connected || !port || !port.writable) {
+      logCmd("< not connected");
+      return;
+    }
+    const w = port.writable.getWriter();
+    try {
+      await w.write(new TextEncoder().encode(line + "\n"));
+    } finally {
+      w.releaseLock();
+    }
+  }).catch(() => logCmd("< send failed"));
+}
+const hex2rgb = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16),
+                      parseInt(h.slice(5, 7), 16)];
+$("cmdPing").onclick = () => sendCmd("$ping");
+$("cmdCal").onclick = () => sendCmd("$cal");
+$("cmdZero").onclick = () => sendCmd("$zero");
+$("cmdMagCal").onclick = () => sendCmd("$magcal");
+$("cmdMagClr").onclick = () => sendCmd("$magclr");
+$("cmdSens").onclick = () => sendCmd("$sens?");
+$("cmdLoraQ").onclick = () => sendCmd("$lora?");
+$("cmdLoraMute").onclick = () => sendCmd("$lora 0");
+$("cmdLoraUn").onclick = () => sendCmd("$lora 1");
+for (let i = 0; i < 4; i++) {
+  $("svSet" + i).onclick = () => sendCmd(`$servo ${i} ${$("svUs" + i).value}`);
+}
+{
+  const sel = $("angCh");
+  for (let i = 0; i < 4; i++) {
+    const o = document.createElement("option");
+    o.value = i;
+    o.textContent = "S" + i;
+    sel.appendChild(o);
+  }
+}
+/* Canard angle in TRUE degrees via the linkage cal (0 = calibrated
+   neutral). Slider previews the number live and sends ONCE on release so a
+   drag doesn't flood the console; $ang (raw servo) stays for console use. */
+const sendAng = d => sendCmd(`$cang ${$("angCh").value} ${d}`);
+$("angSet").onclick = () => sendAng($("angVal").value);
+$("angSlide").oninput = () => { $("angVal").value = $("angSlide").value; };
+$("angSlide").onchange = () => sendAng($("angSlide").value);
+$("angVal").onchange = () => { $("angSlide").value = $("angVal").value; };
+$("angCenter").onclick = () => {
+  $("angVal").value = 0;
+  $("angSlide").value = 0;
+  sendAng(0);
+};
+$("angTest").onclick = () => sendCmd("$cang test");
+$("angRel").onclick = () => sendCmd(`$cang ${$("angCh").value} off`);
+$("angAllOff").onclick = () => sendCmd("$cang alloff");
+$("angScan").onclick = () => sendCmd("$ang scan");
+$("lcStart").onclick = () => sendCmd(`$lcal start ${$("lcFin").value}`);
+$("lcAbort").onclick = () => sendCmd("$lcal abort");
+$("lcJm50").onclick = () => sendCmd("$lcal jog -50");
+$("lcJm10").onclick = () => sendCmd("$lcal jog -10");
+$("lcJp10").onclick = () => sendCmd("$lcal jog 10");
+$("lcJp50").onclick = () => sendCmd("$lcal jog 50");
+$("lcCenter").onclick = () => sendCmd("$lcal point 0");
+$("lcPoint").onclick = () => sendCmd(`$lcal point ${$("lcDeg").value}`);
+$("lcUndo").onclick = () => sendCmd("$lcal undo");
+$("lcSave").onclick = () => sendCmd("$lcal save");
+$("lcShow").onclick = () => sendCmd("$lcal show");
+let lcClearArm = 0, lcClearFin = -1;
+const lcClearReset = () => {
+  lcClearArm = 0; lcClearFin = -1;
+  $("lcClear").textContent = "Delete all points";
+  $("lcClear").classList.remove("armred");
+};
+$("lcClear").onclick = () => {
+  const w = performance.now(), fin = +$("lcFin").value;
+  if (w - lcClearArm < 3000 && fin === lcClearFin) {
+    sendCmd(`$lcal clear ${lcClearFin}`);
+    lcClearReset();
+  } else {
+    lcClearArm = w;
+    lcClearFin = fin;
+    $("lcClear").textContent = `Confirm: wipe S${fin}`;
+    $("lcClear").classList.add("armred");
+    setTimeout(() => {
+      if (lcClearArm && performance.now() - lcClearArm >= 2900) lcClearReset();
+    }, 3100);
+  }
+};
+for (const b of document.querySelectorAll(".lcChk")) {
+  b.onclick = () => sendCmd(`$lcal check ${b.dataset.d}`);
+}
+$("lcLoad").onclick = () => sendCmd("$lcal load");
+$("lcDump").onclick = () => sendCmd("$lcal dump");
+$("lcFlash").onclick = () => sendCmd("$lcal flash");
+$("lcPoints").onclick = e => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (b.dataset.act === "del") sendCmd(`$lcal del ${b.dataset.i}`);
+  else if (b.dataset.act === "edit") {
+    sendCmd(`$lcal edit ${b.dataset.i} ${$("lcDeg").value}`);
+  }
+};
+$("lcFin").onchange = () => { lcClearReset(); renderLcalPoints(); };
+
+/* Point list: staged session points are editable (edit takes the measured-
+   degree box value); an active table is read-only until Load pulls it into
+   the stage. */
+function renderLcalPoints() {
+  const box = $("lcPoints");
+  if (!box) return;
+  const fin = parseInt($("lcFin").value, 10);
+  const st = (S.lcal.stage && S.lcal.stage.fin === fin) ? S.lcal.stage : null;
+  let h = "";
+  if (st) {
+    h += `<div class="hdrrow">S${fin} staged (editable)</div>`;
+    for (let i = 0; i < st.n; i++) {
+      h += `<div class="row"><span>${i}: ${st.deg[i].toFixed(1)}&deg; @ ` +
+           `${Math.round(st.pus[i])} &micro;s</span>` +
+           `<button class="secondary mini" data-act="edit" data-i="${i}" ` +
+           `title="Set this point's angle to the measured-degree box value.">` +
+           `&#9998;</button>` +
+           `<button class="secondary mini" data-act="del" data-i="${i}">` +
+           `&#10005;</button></div>`;
+    }
+    if (!st.n) h += `<div class="row dim2">no points staged yet</div>`;
+  } else {
+    const a = S.lcal.fins[fin];
+    if (a && a.n) {
+      h += `<div class="hdrrow">S${fin} active table ` +
+           `(${a.src === 1 ? "calibrated" : "default"}) &middot; ` +
+           `Load to edit</div>`;
+      for (let i = 0; i < a.n; i++) {
+        h += `<div class="row"><span>${i}: ${a.deg[i].toFixed(1)}&deg; @ ` +
+             `${Math.round(a.pus[i])} &micro;s</span></div>`;
+      }
+    } else {
+      h += `<div class="row dim2">no data &mdash; connect and press ` +
+           `Refresh</div>`;
+    }
+  }
+  box.innerHTML = h;
+}
+
+/* Linkage graph: canard deg (x, fixed -25..+25) vs servo us (y, fixed
+   900..2100). Blue solid = the table currently IN USE (default or saved);
+   red dots/dashes = the points staged this session. They are SUPPOSED to
+   disagree until Save - saving makes the blue line adopt the red points. */
+function drawLcalGraph() {
+  const c = $("lcGraph");
+  if (!c || c.offsetParent === null) return;
+  const g = fitCanvas(c);
+  const dpr = window.devicePixelRatio || 1;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = c.clientWidth, H = c.clientHeight;
+  g.clearRect(0, 0, W, H);
+  const fin = parseInt($("lcFin").value, 10);
+  const act = S.lcal.fins[fin];
+  const st = (S.lcal.stage && S.lcal.stage.fin === fin) ? S.lcal.stage : null;
+  const DMIN = -25, DMAX = 25, UMIN = 900, UMAX = 2100;
+  const L = 40, R = 8, T = 14, B = 24;
+  const X = d => L + (d - DMIN) / (DMAX - DMIN) * (W - L - R);
+  const Y = u => T + (1 - (u - UMIN) / (UMAX - UMIN)) * (H - T - B);
+  g.font = "9px Consolas, monospace";
+  g.lineWidth = 1;
+
+  // grid + tick labels
+  g.strokeStyle = PAL.grid;
+  g.fillStyle = PAL.dim;
+  for (let u = 1000; u <= 2000; u += 250) {
+    g.beginPath(); g.moveTo(L, Y(u)); g.lineTo(W - R, Y(u)); g.stroke();
+    g.fillText(String(u), 4, Y(u) + 3);
+  }
+  for (let d = DMIN; d <= DMAX; d += 5) {
+    g.beginPath(); g.moveTo(X(d), T); g.lineTo(X(d), H - B); g.stroke();
+    if (d % 10 === 0 || d === DMIN || d === DMAX) {
+      const t2 = String(d);
+      g.fillText(t2, X(d) - g.measureText(t2).width / 2, H - B + 10);
+    }
+  }
+
+  // frame + zero-deg reference
+  g.strokeStyle = PAL.edge;
+  g.strokeRect(L, T, W - L - R, H - T - B);
+  g.strokeStyle = PAL.text;
+  g.beginPath(); g.moveTo(X(0), T); g.lineTo(X(0), H - B); g.stroke();
+
+  // axis titles + legend (top margin row)
+  g.fillStyle = PAL.text;
+  g.fillText("servo \u00b5s", 4, 10);
+  const xt = "canard \u00b0";
+  g.fillText(xt, L + (W - L - R) / 2 - g.measureText(xt).width / 2, H - 3);
+  let lx = W - R;
+  const leg = [];
+  if (act && act.n >= 2) {
+    leg.push([act.src === 1 ? "table (saved)" : "table (default)", PAL.c3, 1]);
+  }
+  if (st && st.n) leg.push(["staged", PAL.c1, 0]);
+  for (let i = leg.length - 1; i >= 0; i--) {
+    const wname = g.measureText(leg[i][0]).width;
+    lx -= wname;
+    g.fillStyle = PAL.dim;
+    g.fillText(leg[i][0], lx, 10);
+    lx -= 9;
+    g.fillStyle = leg[i][1];
+    if (leg[i][2]) g.fillRect(lx + 1, 4, 5, 5);
+    else { g.beginPath(); g.arc(lx + 3, 6, 2.6, 0, 6.2832); g.fill(); }
+    lx -= 12;
+  }
+
+  // data, clipped to the plot window (default tables reach +/-60 deg)
+  g.save();
+  g.beginPath();
+  g.rect(L, T, W - L - R, H - T - B);
+  g.clip();
+  if (act && act.n >= 2) {
+    g.strokeStyle = PAL.c3;
+    g.fillStyle = PAL.c3;
+    g.lineWidth = 1.5;
+    g.beginPath();
+    for (let i = 0; i < act.n; i++) {
+      if (i) g.lineTo(X(act.deg[i]), Y(act.pus[i]));
+      else g.moveTo(X(act.deg[i]), Y(act.pus[i]));
+    }
+    g.stroke();
+    for (let i = 0; i < act.n; i++) {
+      g.fillRect(X(act.deg[i]) - 2, Y(act.pus[i]) - 2, 4, 4);
+    }
+    g.lineWidth = 1;
+  }
+  if (st && st.n) {
+    const pts = [];
+    for (let i = 0; i < st.n; i++) pts.push([st.deg[i], st.pus[i]]);
+    pts.sort((a2, b2) => a2[0] - b2[0]);
+    g.strokeStyle = PAL.c1;
+    g.fillStyle = PAL.c1;
+    if (pts.length >= 2) {
+      g.setLineDash([3, 3]);
+      g.beginPath();
+      for (let i = 0; i < pts.length; i++) {
+        if (i) g.lineTo(X(pts[i][0]), Y(pts[i][1]));
+        else g.moveTo(X(pts[i][0]), Y(pts[i][1]));
+      }
+      g.stroke();
+      g.setLineDash([]);
+    }
+    for (const q of pts) {
+      g.beginPath();
+      g.arc(X(q[0]), Y(q[1]), 2.6, 0, 6.2832);
+      g.fill();
+    }
+  }
+  g.restore();
+}
+$("svCenter").onclick = () => sendCmd("$servo center");
+$("svSweep").onclick = () => sendCmd("$servo sweep");
+$("svOff").onclick = () => sendCmd("$servo off");
+$("ctlDisarm").onclick = () => sendCmd("$disarm");
+$("ctlRollTest").onclick = () => sendCmd("$rolltest");
+$("ctlRate").onclick = () => sendCmd("$ctlmode rate");
+$("ctlAngle").onclick = () => sendCmd("$ctlmode angle");
+$("ctlGains").onclick = () => sendCmd(
+    `$ctl ${$("ctlKpr").value} ${$("ctlKir").value} ${$("ctlKpa").value}`);
+/* Arm mirrors the firmware's two-step: first click sends $arm (opens the
+   5 s window on the rocket), second click within 4 s confirms. */
+let armAt = 0;
+$("ctlArm").onclick = () => {
+  const w = performance.now();
+  if (w - armAt < 4000) {
+    armAt = 0;
+    $("ctlArm").textContent = "Arm";
+    sendCmd("$arm yes");
+  } else {
+    armAt = w;
+    sendCmd("$arm");
+    $("ctlArm").textContent = "Confirm ARM";
+    setTimeout(() => {
+      if (armAt && performance.now() - armAt >= 4000) {
+        armAt = 0;
+        $("ctlArm").textContent = "Arm";
+      }
+    }, 4200);
+  }
+};
+$("cmdLedA").onclick = () => {
+  const c = hex2rgb($("ledA").value);
+  sendCmd(`$led a ${c[0]} ${c[1]} ${c[2]}`);
+};
+$("cmdLedB").onclick = () => {
+  const c = hex2rgb($("ledB").value);
+  sendCmd(`$led b ${c[0]} ${c[1]} ${c[2]}`);
+};
+$("cmdLedAll").onclick = () => {
+  const c = hex2rgb($("ledAll").value);
+  sendCmd(`$led all ${c[0]} ${c[1]} ${c[2]}`);
+};
+$("cmdLedOff").onclick = () => sendCmd("$led all 0 0 0");
+/* Reboot is two-step armed (no blocking dialogs): first click arms for 3 s,
+   second click within the window sends. */
+let rstArm = 0;
+$("cmdRst").onclick = () => {
+  const w = performance.now();
+  if (w - rstArm < 3000) {
+    rstArm = 0;
+    $("cmdRst").textContent = "Reboot";
+    sendCmd("$rst");
+  } else {
+    rstArm = w;
+    $("cmdRst").textContent = "Confirm reboot";
+    setTimeout(() => {
+      if (performance.now() - rstArm >= 2900) {
+        $("cmdRst").textContent = "Reboot";
+        rstArm = 0;
+      }
+    }, 3100);
+  }
+};
+
+/* ================= render loop ================= */
+let lastDraw = 0, lastChartDraw = 0, lastDomDraw = 0;
+function frame(ts) {
+  if (ts - lastDraw > 15) {   // ~60 fps instruments: every 50 Hz record shows
+    lastDraw = ts;
+    const r = S.paused ? S.view : S.last;
+    const now = r ? r._t : 0;
+    updatePadAnchor(r);
+    if (ts - lastChartDraw > 32) {   // strip charts at ~30 fps
+      lastChartDraw = ts;
+      for (const k in charts) {
+        if (charts[k].c.offsetParent !== null) charts[k].draw(now);
+      }
+      drawLcalGraph();
+    }
+    drawDial(r);
+    drawRocket3D(r);
+    drawCompass(r);
+    drawMap(r);
+    if (ts - lastDomDraw > 32) {     // text readouts at ~30 fps is plenty
+      lastDomDraw = ts;
+      updateDom();
+    }
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ================= Web Serial ================= */
+let port = null, reader = null, keepReading = false;
+
+async function connect() {
+  if (!("serial" in navigator)) {
+    alert("Web Serial is not available. Use Chrome or Edge, opened as a top-level page (not embedded).");
+    return;
+  }
+  try {
+    if (S.linkPref === "lora") {
+      try {
+        // The base station's native USB CDC enumerates under Espressif's
+        // vendor id - the chooser then lists only base stations.
+        port = await navigator.serial.requestPort(
+            { filters: [{ usbVendorId: 0x303A }] });
+      } catch (e) {
+        // none on that VID (UART-bridge base, or not plugged in): fall
+        // back to the full chooser instead of dead-ending
+        port = await navigator.serial.requestPort();
+      }
+    } else {
+      port = await navigator.serial.requestPort();
+    }
+    await port.open({ baudRate: 921600 });
+  } catch (e) { return; }
+  stopDemo();
+  resetSession();
+  S.connected = true;
+  keepReading = true;
+  $("conndot").classList.add("on");
+  $("btnConnect").textContent = "Disconnect";
+  $("btnPause").disabled = false;
+  readLoop();
+}
+
+async function readLoop() {
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (keepReading && port && port.readable) {
+    reader = port.readable.getReader();
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf("\n")) >= 0) {
+          handleLine(buf.slice(0, i));
+          buf = buf.slice(i + 1);
+        }
+        if (buf.length > 65536) buf = "";  // runaway line: resync
+      }
+    } catch (e) {
+      /* device unplugged or read error: loop retries while keepReading */
+    } finally {
+      try { reader.releaseLock(); } catch (e) {}
+    }
+  }
+}
+
+async function disconnect() {
+  keepReading = false;
+  try { if (reader) await reader.cancel(); } catch (e) {}
+  try { if (port) await port.close(); } catch (e) {}
+  port = null;
+  S.connected = false;
+  $("conndot").classList.remove("on");
+  $("btnConnect").textContent = "Connect";
+}
+
+$("btnConnect").onclick = () => S.connected ? disconnect() : connect();
+
+/* Link mode. The stream itself is auto-detected from the hdr record (the
+   base station stamps mode:"lora"); the selector drives the port-chooser
+   filter and the expectation shown in the link badge. */
+S.linkPref = "usb";
+try { S.linkPref = localStorage.getItem("rn_link") || "usb"; } catch (e) {}
+function setLinkPref(m) {
+  S.linkPref = m;
+  try { localStorage.setItem("rn_link", m); } catch (e) {}
+  $("lmUsb").classList.toggle("on", m === "usb");
+  $("lmLora").classList.toggle("on", m === "lora");
+}
+$("lmUsb").onclick = () => setLinkPref("usb");
+$("lmLora").onclick = () => setLinkPref("lora");
+setLinkPref(S.linkPref);
+if ("serial" in navigator) {
+  // surface a yanked cable without requiring a page reload
+  navigator.serial.addEventListener("disconnect", ev => {
+    if (port && ev.target === port) disconnect();
+  });
+} else {
+  $("btnConnect").title = "Web Serial unavailable — Chrome/Edge required";
+}
+
+/* ================= session export ================= */
+function download(blob, ext) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  const d = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  a.download = `rocketnav_${d}.${ext}`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+$("btnJsonl").onclick = () => {
+  if (!S.rawLines.length) return;
+  download(new Blob([S.rawLines.join("\n") + "\n"],
+                    { type: "application/x-ndjson" }), "jsonl");
+};
+$("btnCsv").onclick = () => {
+  if (!S.session.length) return;
+  const parts = [CSV_COLS.join(",") + "\n"];
+  for (const r of S.session) parts.push(stToCsvRow(r).join(",") + "\n");
+  download(new Blob(parts, { type: "text/csv" }), "csv");
+};
+
+function wireConsole() {
+  const paint = () => {
+    $("consoleState").textContent = S.consolePaused ? "paused" : "";
+    $("consolePauseB").textContent = S.consolePaused ? "Resume" : "Pause";
+  };
+  const toggle = () => { S.consolePaused = !S.consolePaused; paint(); };
+  $("console").onclick = () => {
+    const sel = window.getSelection();
+    if (sel && sel.toString()) return;  // copying a line, not pausing
+    toggle();
+  };
+  $("consolePauseB").onclick = toggle;
+  $("consoleClear").onclick = () => {
+    S.consoleLines = [];
+    S.consoleDirty = true;
+  };
+  $("cmdLogClear").onclick = () => {
+    CMDLOG.length = 0;
+    const el = $("cmdLog");
+    if (el) el.textContent = "";
+  };
+  // typed command line: Enter sends through the same path as the buttons,
+  // arrows walk history; the send is echoed into the stream view so the
+  // exchange reads like a terminal.
+  const inp = $("consoleIn"), hist = [];
+  let hi = 0;
+  inp.onkeydown = e => {
+    if (e.key === "Enter") {
+      const line = inp.value.trim();
+      if (!line) return;
+      sendCmd(line);
+      S.consoleLines.push("> " + line);
+      if (S.sim) S.consoleLines.push("< sim (no device)");
+      else if (!S.connected) S.consoleLines.push("< not connected");
+      S.consoleDirty = true;
+      if (hist[hist.length - 1] !== line) hist.push(line);
+      hi = hist.length;
+      inp.value = "";
+    } else if (e.key === "ArrowUp" && hist.length) {
+      hi = Math.max(0, hi - 1);
+      inp.value = hist[hi];
+      e.preventDefault();
+    } else if (e.key === "ArrowDown" && hist.length) {
+      hi = Math.min(hist.length, hi + 1);
+      inp.value = hi === hist.length ? "" : hist[hi];
+      e.preventDefault();
+    }
+  };
+}
+
+/* ================= demo generator =================
+   Synthesizes schema-exact records so every panel can be verified with no
+   hardware: 4 s pad (align → wait fix → run), 3 s boost, coast to apogee,
+   descent. The mag vector is built from the site field and the INVERSE of
+   the demo attitude so the field panel reads the true |B|/inclination. */
+let demoTimer = null;
+function startDemo() {
+  if (S.connected) return;
+  stopDemo();
+  resetSession();
+  S.sim = true; $("bSim").style.display = "";
+  $("btnDemo").textContent = "Stop demo";
+  $("btnPause").disabled = false;
+  const REF = { lat: 40.1164, lon: -88.2434, alt: 222, B: [20.15, -1.23, 47.77] };
+  let t = 0, us = 1e6, seq = 0;
+  let alt = 0, vz = 0;       // up-positive for the profile
+  let dimu = 0;
+  const g2r = Math.PI / 180;
+  const gauss = () => (Math.random() + Math.random() + Math.random() +
+                       Math.random() - 2) * Math.sqrt(3);
+  // Wall-clock-driven so browser timer throttling can't slow the sim: each
+  // tick emits however many 20 ms records real time calls for (capped).
+  const demoStart = performance.now();
+  let emitted = 0;
+  let prevEul = null;
+  let calSent = false;
+  demoTimer = setInterval(() => {
+    let target = Math.floor((performance.now() - demoStart) / 20);
+    if (target - emitted > 25) emitted = target - 25;
+    for (; emitted < target; emitted++) {
+      t += 0.02; us += 20000; seq++;
+      const fst = t < 3 ? 1 : (t < 4 ? 2 : 3);
+      const run = fst === 3;
+      const tf = t - 4;             // flight-relative time
+      let az = 0;
+      if (run) {
+        if (tf < 3) az = 60; else az = (alt > 0 || vz > 0) ? -9.81 : 0;
+        vz += az * 0.02;
+        if (tf >= 3 && vz < -22) vz = -22;   // chute-ish terminal
+        alt += vz * 0.02;
+        if (alt < 0) { alt = 0; vz = 0; }
+      }
+      const roll = 1.5 * Math.sin(t * 1.1), pitch = -1.0 + 1.2 * Math.sin(t * 0.9);
+      const yaw = 25 + 3 * Math.sin(t * 0.25);
+      // quaternion from euler ZYX
+      const cr = Math.cos(roll * g2r / 2), sr = Math.sin(roll * g2r / 2);
+      const cp = Math.cos(pitch * g2r / 2), sp = Math.sin(pitch * g2r / 2);
+      const cy = Math.cos(yaw * g2r / 2), sy = Math.sin(yaw * g2r / 2);
+      const q = [cy * cp * cr + sy * sp * sr, cy * cp * sr - sy * sp * cr,
+                 cy * sp * cr + sy * cp * sr, sy * cp * cr - cy * sp * sr];
+      // body rate: euler derivative (small-angle: fine for a demo trace)
+      const eulNow = [roll, pitch, yaw];
+      const gyr = prevEul
+        ? eulNow.map((e, i) => (e - prevEul[i]) * g2r / 0.02 + 0.005 * gauss())
+        : [0, 0, 0];
+      prevEul = eulNow;
+      // body field = R' * B_ned (inverse attitude), plus noise
+      const [w, x, y, z] = q;
+      const B = REF.B;
+      const mb = [
+        (1 - 2 * (y * y + z * z)) * B[0] + 2 * (x * y + w * z) * B[1] + 2 * (x * z - w * y) * B[2],
+        2 * (x * y - w * z) * B[0] + (1 - 2 * (x * x + z * z)) * B[1] + 2 * (y * z + w * x) * B[2],
+        2 * (x * z + w * y) * B[0] + 2 * (y * z - w * x) * B[1] + (1 - 2 * (x * x + y * y)) * B[2],
+      ].map(v => v + 0.3 * gauss());
+      const sp3 = run ? [0.4 + 0.2 * Math.exp(-tf), 0.4 + 0.2 * Math.exp(-tf), 0.6] : null;
+      const nis = () => Math.max(0.02, 1 + 1.2 * gauss() * gauss());
+      const rej = Math.random() < 0.01;
+      if (Math.random() < 0.002) dimu++;
+      const r = {
+        t: "st", us: us, seq: seq, fst: fst, alq: 1,
+        lat: run ? REF.lat + (2 * Math.sin(t * 0.1) + 0.5 * gauss()) * 1e-6 : null,
+        lon: run ? REF.lon + (2 * Math.cos(t * 0.09) + 0.5 * gauss()) * 1e-6 : null,
+        alt: run ? REF.alt + alt : null,
+        p: run ? [2 * Math.sin(t * 0.1), 2 * Math.cos(t * 0.09), -alt] : null,
+        v: run ? [0.2 * gauss(), 0.2 * gauss(), -vz] : null,
+        q: q, eul: eulNow,
+        sp: sp3, sv: run ? [0.1, 0.1, 0.12] : null,
+        sa: [0.15, 0.15, fst >= 2 ? 0.6 : 5],
+        bg: [0.008 + 0.0002 * gauss(), -0.012, 0.005],
+        ba: [0.03, -0.04, 0.08 + 0.002 * gauss()],
+        bb: run ? 2.0 + 0.05 * gauss() : null,
+        ral: fst >= 2 ? alt + 0.06 * gauss() : null,
+        rvs: fst >= 2 ? vz + 0.03 * gauss() : null,
+        sra: fst >= 2 ? 0.5 : null, srv: fst >= 2 ? 0.22 : null,
+        acc: [0.1 * gauss(), 0.1 * gauss(), -(9.81 + az) + 0.1 * gauss()],
+        gyr: gyr,
+        mag: mb,
+        // raw = calibrated plus a fixed fake hard iron: the mag-raw chart
+        // shows a plausibly offset trace in demo mode
+        mgr: [mb[0] + 6.1, mb[1] - 3.2, mb[2] + 2.0],
+        pa: 98800 - alt * 11.7, tc: 22 - alt * 0.0065,
+        gfix: 3, gsv: 14 + Math.round(2 * Math.random()),
+        ghac: 0.9 + 0.2 * Math.random(), gvac: 1.4, gsac: 0.08,
+        glat: REF.lat + 1e-6 * gauss(), glon: REF.lon + 1e-6 * gauss(),
+        galt: REF.alt + alt + 1.2 * gauss(), gage: 0.05 + 0.05 * Math.random(),
+        igp: run ? [0.5 * gauss(), 0.5 * gauss(), 0.7 * gauss()] : null,
+        igv: run ? [0.1 * gauss(), 0.1 * gauss(), 0.1 * gauss()] : null,
+        img: fst >= 2 ? 0.4 * gauss() : null,
+        ibr: run ? 0.4 * gauss() : null,
+        ngp: run ? nis() * 3 : null, ngv: run ? nis() * 3 : null,
+        nmg: fst >= 2 ? nis() : null, nbr: run ? nis() : null,
+        kgp: run ? (rej ? 0 : 1) : null, kgv: run ? 1 : null,
+        kmg: fst >= 2 ? 1 : null, kbr: run ? 1 : null,
+        himu: 3, hmag: 3, hbar: 3, hgps: 3,
+        dimu: dimu, dmag: 0, dbar: 0, dgps: 2, dtx: 0,
+        ei2c: 0, ri2c: 0, grz: 9.8 + 0.3 * Math.random(),
+        fhz: 399 + 2 * Math.random(), lmx: 900 + Math.round(600 * Math.random()),
+      };
+      if (seq === 1) {
+        handleLine(JSON.stringify({ t: "hdr", us: 0, fw: "1.0.0-sim", sch: 1,
+          imu: 1, mag: 1, bar: 1, gps: 1, iodr: 400, afs: 32, gfs: 2000,
+          modr: 80, mmode: "cont", gmode: "auto", bhz: 25, ghz: 10, ohz: 50 }));
+        for (const txt of ["imu ICM-45686 @0x68: OK", "mag LIS3MDL @0x1C: OK",
+                           "baro BME280 @0x77: OK", "gnss SAM-M8Q @0x42: OK",
+                           "cal: averaging gyro + gravity (hold still)"])
+          handleLine(JSON.stringify({ t: "msg", us: us, txt: txt }));
+      }
+      if (fst >= 2 && !calSent) {
+        calSent = true;
+        handleLine(JSON.stringify({ t: "cal", us: us,
+          bg: [0.4584, -0.6875, 0.2865], eul: [1.4, -0.9, 25.2],
+          alq: 1, dur: 3.0 }));
+        handleLine(JSON.stringify({ t: "msg", us: us,
+          txt: "cal: done (clean static)" }));
+        handleLine(JSON.stringify({ t: "msg", us: us,
+          txt: "nav: waiting for GNSS fix" }));
+      }
+      if (fst === 3 && !S.org) {
+        handleLine(JSON.stringify({ t: "org", us: us, lat: REF.lat,
+          lon: REF.lon, alt: REF.alt, hae: 189, g0: 9.8011,
+          p0: 98800, t0: 22 }));
+        handleLine(JSON.stringify({ t: "msg", us: us,
+          txt: "nav: origin anchored - full navigation" }));
+      }
+      handleLine(JSON.stringify(r));
+    }
+  }, 40);
+}
+function stopDemo() {
+  if (demoTimer) { clearInterval(demoTimer); demoTimer = null; }
+  S.sim = false; $("bSim").style.display = "none";
+  $("btnDemo").textContent = "Demo";
+}
+$("btnDemo").onclick = () => demoTimer ? stopDemo() : startDemo();
+</script>
+</body>
+</html>

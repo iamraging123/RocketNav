@@ -1,0 +1,3 @@
+# parse_test.js slices this file at fixed BYTE offsets (mid-stream join
+# test) - newline conversion must never touch it.
+viewer/replay.jsonl -text

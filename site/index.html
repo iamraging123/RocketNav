@@ -1,0 +1,736 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RocketNav RN-01</title>
+<meta name="description" content="RocketNav — a rocket navigation computer built from first principles: 16-state error-state Kalman filter, STM32F7 firmware, single-file ground station.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #EDECE6;      /* cool bond paper, not warm cream */
+    --paper-2: #E3E2DA;    /* figure fill */
+    --ink: #191B1D;
+    --ink-2: #575C5F;
+    --rule: #C3C1B5;
+    --flame: #E04A0C;      /* international orange — flight-test markings */
+    --go: #1F6A44;         /* range-safety GO */
+    --console: #111416;
+    --console-ink: #D9D7CC;
+    --console-dim: #7E8382;
+    --disp: "Barlow Condensed", "Arial Narrow", Arial, sans-serif;
+    --body: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --mono: "IBM Plex Mono", "Consolas", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: inherit; text-decoration: none; border-bottom: 1px solid var(--ink-2); }
+  a:hover { border-bottom-color: var(--flame); color: var(--flame); }
+  a:focus-visible, button:focus-visible {
+    outline: 2px solid var(--flame); outline-offset: 3px; border-radius: 1px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 28px; }
+
+  /* ---------- document header ---------- */
+  .doc-rule {
+    border-top: 3px solid var(--ink);
+    border-bottom: 1px solid var(--ink);
+    padding: 8px 0 7px;
+    display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--ink);
+  }
+  .doc-rule b { color: var(--flame); font-weight: 500; }
+
+  .cover { padding: 44px 0 0; }
+  .cover h1 {
+    font-family: var(--disp); font-weight: 700; text-transform: uppercase;
+    font-size: clamp(72px, 13.5vw, 168px);
+    line-height: .86; letter-spacing: -0.012em;
+    margin: 18px 0 10px;
+  }
+  .cover h1 .thin { font-weight: 500; color: var(--ink-2); }
+  .lede {
+    max-width: 60ch; font-size: 17.5px; color: var(--ink);
+    margin: 14px 0 8px;
+  }
+  .lede em { font-style: normal; color: var(--flame); }
+  .cover-links {
+    display: flex; gap: 26px; flex-wrap: wrap; align-items: baseline;
+    font-family: var(--mono); font-size: 12.5px; letter-spacing: .08em;
+    text-transform: uppercase; margin: 18px 0 8px;
+  }
+  .cover-links a { border-bottom-width: 1px; padding-bottom: 2px; }
+  .cover-links a::before { content: "→ "; color: var(--flame); }
+
+  /* ---------- fig 01 elevation ---------- */
+  .elevation { margin: 34px 0 0; }
+  .fig-frame {
+    border: 1px solid var(--ink);
+    background: var(--paper-2);
+    padding: clamp(10px, 2.5vw, 26px);
+    overflow-x: auto;
+  }
+  .fig-cap {
+    display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--ink-2);
+    border: 1px solid var(--ink); border-top: 0;
+    padding: 8px 12px;
+  }
+  .fig-cap b { color: var(--ink); font-weight: 500; }
+  svg text { font-family: var(--mono); }
+
+  .specstrip {
+    list-style: none;
+    display: flex; flex-wrap: wrap;
+    border-bottom: 3px solid var(--ink);
+    margin-top: 40px;
+  }
+  .specstrip li {
+    flex: 1 1 150px;
+    border-top: 1px solid var(--ink);
+    border-right: 1px solid var(--rule);
+    padding: 12px 14px 16px;
+  }
+  .specstrip li:last-child { border-right: 0; }
+  .specstrip .n {
+    font-family: var(--disp); font-weight: 600; font-size: 34px; line-height: 1.05;
+    letter-spacing: .01em;
+  }
+  .specstrip .u { font-family: var(--mono); font-size: 11px; letter-spacing: .13em;
+    text-transform: uppercase; color: var(--ink-2); display: block; margin-top: 3px; }
+
+  /* ---------- bands ---------- */
+  .band { padding: 74px 0 84px; border-bottom: 1px solid var(--rule); }
+  .band-head {
+    display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap;
+    margin-bottom: 34px;
+  }
+  .band-head .idx {
+    font-family: var(--mono); font-size: 13px; color: var(--flame);
+    letter-spacing: .1em;
+  }
+  .band-head h2 {
+    font-family: var(--disp); font-weight: 600; text-transform: uppercase;
+    font-size: clamp(36px, 5vw, 58px); line-height: 1; letter-spacing: 0;
+  }
+  .band-head .src {
+    margin-left: auto; font-family: var(--mono); font-size: 12px;
+    color: var(--ink-2); letter-spacing: .06em;
+  }
+  .cols { display: grid; grid-template-columns: minmax(300px, 5fr) minmax(320px, 6fr); gap: 44px; align-items: start; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+
+  /* state table */
+  .state-table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+  .state-table th {
+    text-align: left; font-family: var(--mono); font-size: 11px;
+    text-transform: uppercase; letter-spacing: .13em; color: var(--ink-2);
+    font-weight: 400; border-bottom: 1px solid var(--ink); padding: 0 10px 6px 0;
+  }
+  .state-table td { border-bottom: 1px solid var(--rule); padding: 9px 10px 9px 0; vertical-align: top; }
+  .state-table .sym { font-family: var(--mono); font-size: 14px; white-space: nowrap; }
+  .state-table .unit { font-family: var(--mono); font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+  .filter-notes { margin-top: 26px; display: grid; gap: 14px; }
+  .filter-notes p { font-size: 14.5px; color: var(--ink); max-width: 56ch; }
+  .filter-notes p b { font-weight: 600; }
+  .filter-notes p code, .state-table code, .placard code {
+    font-family: var(--mono); font-size: .92em; background: var(--paper-2);
+    padding: 1px 4px; border: 1px solid var(--rule);
+  }
+
+  /* fig 02 matrix */
+  .matrix-fig .fig-frame { padding: clamp(8px, 2vw, 20px); }
+  .mx-note {
+    border: 1px solid var(--ink); border-top: 0; padding: 12px 14px;
+    font-size: 13.5px; min-height: 76px; background: var(--paper);
+  }
+  .mx-note b { font-family: var(--mono); font-size: 12px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--flame); display: block; margin-bottom: 3px; }
+  .mx-legend {
+    display: flex; gap: 20px; flex-wrap: wrap; margin-top: 12px;
+    font-family: var(--mono); font-size: 11px; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--ink-2);
+  }
+  .mx-legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .sw { width: 15px; height: 15px; border: 1px solid var(--ink); display: inline-block; }
+  .sw.solid { background: var(--ink); }
+  .sw.hatch { background: repeating-linear-gradient(45deg, transparent 0 3px, rgba(25,27,29,.55) 3px 4px); }
+  .sw.meas { border: 2px solid var(--flame); }
+  #mxSvg [data-note] { cursor: pointer; }
+  #mxSvg [data-note]:hover rect.blk, #mxSvg [data-note].on rect.blk { stroke: var(--flame); stroke-width: 2; }
+
+  /* ---------- sequence ---------- */
+  .seq { display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; }
+  .placard {
+    flex: 1 1 190px; border: 1px solid var(--ink); border-left: 3px solid var(--ink);
+    padding: 14px 16px 18px; background: var(--paper);
+    position: relative; margin: 0 26px 26px 0;
+  }
+  .placard::after {   /* connector arrow */
+    content: ""; position: absolute; right: -21px; top: 50%;
+    width: 16px; height: 1px; background: var(--ink);
+  }
+  .placard::before {
+    content: ""; position: absolute; right: -10px; top: 50%; margin-top: -3.5px;
+    border: 4px solid transparent; border-left: 7px solid var(--ink);
+  }
+  .placard.last::after, .placard.last::before { display: none; }
+  .placard .fs {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .12em;
+    color: var(--flame);
+  }
+  .placard h3 {
+    font-family: var(--disp); font-weight: 600; text-transform: uppercase;
+    font-size: 27px; line-height: 1.05; margin: 2px 0 7px;
+  }
+  .placard p { font-size: 13.5px; color: var(--ink); }
+  .placard.branch { border-left-color: var(--flame); border-style: dashed; border-left-style: solid; }
+  .seq-foot {
+    font-family: var(--mono); font-size: 12.5px; color: var(--ink-2);
+    margin-top: 4px; max-width: 74ch;
+  }
+  .seq-foot b { color: var(--flame); font-weight: 500; }
+
+  /* ---------- ground station (console band) ---------- */
+  .console-band {
+    background: var(--console); color: var(--console-ink);
+    border-bottom: 3px solid var(--ink);
+  }
+  .console-band .band-head h2 { color: var(--console-ink); }
+  .console-band .band-head .src { color: var(--console-dim); }
+  .console-band a { border-bottom-color: var(--console-dim); }
+  .console-band a:hover { color: var(--flame); border-bottom-color: var(--flame); }
+  .ndjson {
+    border: 1px solid #2B2F31; background: #0B0D0E;
+    padding: 16px 18px; font-family: var(--mono); font-size: 12.5px;
+    line-height: 1.85; overflow: hidden;
+  }
+  .ndjson .line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--console-dim); }
+  .ndjson .k { color: #8FA0A6; }
+  .ndjson .v { color: var(--console-ink); }
+  .ndjson .s { color: var(--flame); }
+  .ndjson-cap {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--console-dim); border: 1px solid #2B2F31; border-top: 0; padding: 8px 12px;
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+  }
+  .gs-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    border-top: 1px solid #2B2F31; border-left: 1px solid #2B2F31; margin-top: 36px;
+  }
+  @media (max-width: 860px) { .gs-grid { grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); } }
+  .gs-cell {
+    border-right: 1px solid #2B2F31; border-bottom: 1px solid #2B2F31;
+    padding: 16px 18px 20px;
+  }
+  .gs-cell h3 {
+    font-family: var(--disp); font-weight: 600; font-size: 22px;
+    text-transform: uppercase; letter-spacing: .015em; margin-bottom: 5px;
+  }
+  .gs-cell p { font-size: 13.5px; color: var(--console-dim); }
+  .gs-cell p b { color: var(--console-ink); font-weight: 500; }
+
+  /* ---------- verification ---------- */
+  .verify-wrap { display: grid; grid-template-columns: 1fr auto; gap: 44px; align-items: start; }
+  @media (max-width: 900px) { .verify-wrap { grid-template-columns: 1fr; } }
+  .verify-table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+  .verify-table th {
+    text-align: left; font-family: var(--mono); font-size: 11px; font-weight: 400;
+    text-transform: uppercase; letter-spacing: .13em; color: var(--ink-2);
+    border-bottom: 1px solid var(--ink); padding: 0 12px 6px 0;
+  }
+  .verify-table td { border-bottom: 1px solid var(--rule); padding: 11px 12px 11px 0; vertical-align: top; }
+  .verify-table .r { font-family: var(--mono); font-size: 13px; white-space: nowrap; }
+  .go, .hold {
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: .14em;
+    padding: 3px 8px 2px; border: 1px solid currentColor; white-space: nowrap;
+  }
+  .go { color: var(--go); }
+  .hold { color: var(--flame); }
+  .stamp {
+    align-self: center;
+    border: 3px double var(--go); color: var(--go);
+    padding: 18px 26px 20px; transform: rotate(-5deg);
+    text-align: center; max-width: 250px;
+  }
+  .stamp .big {
+    font-family: var(--disp); font-weight: 700; text-transform: uppercase;
+    font-size: 33px; line-height: 1; letter-spacing: .03em;
+  }
+  .stamp .small {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .18em;
+    text-transform: uppercase; margin-top: 7px; color: var(--flame);
+  }
+
+  /* ---------- footer ---------- */
+  footer { padding: 54px 0 46px; }
+  .manifest { width: 100%; border-collapse: collapse; font-size: 13.5px; margin-bottom: 40px; }
+  .manifest td { border-bottom: 1px solid var(--rule); padding: 8px 12px 8px 0; }
+  .manifest .f { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; }
+  .manifest .d { color: var(--ink-2); }
+  .colophon {
+    border-top: 3px solid var(--ink); padding-top: 10px;
+    display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+    font-family: var(--mono); font-size: 11px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--ink-2);
+  }
+
+  /* ---------- motion ---------- */
+  .draw { stroke-dasharray: 1400; stroke-dashoffset: 1400; animation: draw 1.1s ease-out forwards; }
+  .leader { stroke-dasharray: 220; stroke-dashoffset: 220; animation: draw .55s ease-out forwards; }
+  .lbl { opacity: 0; animation: fadeup .5s ease-out forwards; }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  @keyframes fadeup { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .draw, .leader { animation: none; stroke-dashoffset: 0; }
+    .lbl { animation: none; opacity: 1; }
+  }
+</style>
+</head>
+<body>
+
+<header class="cover">
+  <div class="wrap">
+    <div class="doc-rule">
+      <span>RN-01 · FLIGHT NAVIGATION COMPUTER</span>
+      <span>FW <b>1.0.0</b> · TELEMETRY SCHEMA <b>1</b> · 2026</span>
+    </div>
+    <h1>Rocket<span class="thin">Nav</span></h1>
+    <p class="lede">A rocket navigation computer built from first principles — a
+      16-state error-state Kalman filter on an STM32F7, a hand-written IMU driver,
+      and a single-file ground station. <em>No fusion libraries.</em>
+      Every equation is in the repo, and every claim below is tested.</p>
+    <nav class="cover-links" aria-label="Project documents">
+      <a href="../viewer/index.html">Open the ground station</a>
+      <a href="../DESIGN.md">Design note</a>
+      <a href="../SCHEMA.md">Telemetry schema</a>
+    </nav>
+
+    <figure class="elevation">
+      <div class="fig-frame">
+        <svg id="elevSvg" viewBox="0 0 1120 305" width="1120" height="305" style="min-width:820px; width:100%; height:auto; display:block"
+             role="img" aria-label="Side elevation of the rocket showing the navigation sensor stations: GNSS antenna, magnetometer, microcontroller, inertial unit and barometer along the airframe.">
+          <!-- centerline (engineering CL: long-dash-dot) -->
+          <line x1="30" y1="150" x2="952" y2="150" stroke="#575C5F" stroke-width="1" stroke-dasharray="22 6 3 6"/>
+          <!-- airframe outline -->
+          <path class="draw" d="M 96 150
+                   C 180 108, 250 104, 320 104
+                   L 856 104
+                   L 916 122
+                   L 916 178
+                   L 856 196
+                   L 320 196
+                   C 250 196, 180 192, 96 150 Z"
+                fill="none" stroke="#191B1D" stroke-width="2.2"/>
+          <!-- fins, side view (top and bottom) -->
+          <path class="draw" d="M 790 104 L 900 42 L 942 42 L 872 104 Z" fill="none" stroke="#191B1D" stroke-width="2"/>
+          <path class="draw" d="M 790 196 L 900 258 L 942 258 L 872 196 Z" fill="none" stroke="#191B1D" stroke-width="2"/>
+          <!-- body +X axis out the nose -->
+          <line class="leader" x1="96" y1="150" x2="40" y2="150" stroke="#E04A0C" stroke-width="2"/>
+          <path d="M 40 150 l 10 -5 l 0 10 Z" fill="#E04A0C"/>
+          <text class="lbl" x="34" y="136" font-size="11" fill="#E04A0C" letter-spacing="1.5" style="animation-delay:.9s">+X</text>
+
+          <!-- station leaders: above -->
+          <g stroke="#191B1D" stroke-width="1">
+            <line class="leader" x1="345" y1="104" x2="345" y2="58" style="animation-delay:.25s"/>
+            <line class="leader" x1="600" y1="104" x2="600" y2="58" style="animation-delay:.45s"/>
+            <line class="leader" x1="760" y1="104" x2="760" y2="30" style="animation-delay:.65s"/>
+          </g>
+          <g fill="#191B1D" font-size="11.5" letter-spacing="1">
+            <circle cx="345" cy="104" r="3" fill="#E04A0C"/>
+            <circle cx="600" cy="104" r="3" fill="#E04A0C"/>
+            <circle cx="760" cy="104" r="3" fill="#E04A0C"/>
+            <text class="lbl" x="345" y="48" text-anchor="middle" style="animation-delay:.5s">SAM-M8Q · GNSS</text>
+            <text class="lbl" x="600" y="48" text-anchor="middle" style="animation-delay:.7s">STM32F722 · NAV MCU</text>
+            <text class="lbl" x="760" y="20" text-anchor="middle" style="animation-delay:.9s">BME280 · BARO</text>
+          </g>
+          <!-- station leaders: below -->
+          <g stroke="#191B1D" stroke-width="1">
+            <line class="leader" x1="500" y1="196" x2="500" y2="248" style="animation-delay:.35s"/>
+            <line class="leader" x1="676" y1="196" x2="676" y2="276" style="animation-delay:.55s"/>
+          </g>
+          <g fill="#191B1D" font-size="11.5" letter-spacing="1">
+            <circle cx="500" cy="196" r="3" fill="#E04A0C"/>
+            <circle cx="676" cy="196" r="3" fill="#E04A0C"/>
+            <text class="lbl" x="500" y="264" text-anchor="middle" style="animation-delay:.6s">LIS3MDL · MAG</text>
+            <text class="lbl" x="676" y="292" text-anchor="middle" style="animation-delay:.8s">ICM-45686 · IMU · 400 Hz</text>
+          </g>
+          <!-- I2C bus note -->
+          <text class="lbl" x="1086" y="140" text-anchor="end" font-size="10.5" fill="#575C5F" letter-spacing="1.2" style="animation-delay:1.05s">ONE I²C BUS · 400 kHz</text>
+          <text class="lbl" x="1086" y="168" text-anchor="end" font-size="10.5" fill="#575C5F" letter-spacing="1.2" style="animation-delay:1.05s">UART TELEMETRY · 921 600 Bd</text>
+        </svg>
+      </div>
+      <figcaption class="fig-cap">
+        <span><b>FIG. 01</b> — VEHICLE INSTRUMENTATION, SIDE ELEVATION</span>
+        <span>SENSOR FRAMES MAPPED BODY-X OUT THE NOSE</span>
+      </figcaption>
+    </figure>
+
+    <ul class="specstrip" aria-label="Key specifications">
+      <li><span class="n">400 Hz</span><span class="u">filter loop, DRDY-gated</span></li>
+      <li><span class="n">16</span><span class="u">error states estimated</span></li>
+      <li><span class="n">25 Hz</span><span class="u">baro fusion, latency-compensated</span></li>
+      <li><span class="n">102 576 B</span><span class="u">flash — 19% of the F722</span></li>
+      <li><span class="n">63 / 63</span><span class="u">host checks passing</span></li>
+    </ul>
+  </div>
+</header>
+
+<main>
+  <!-- ================= 01 THE FILTER ================= -->
+  <section class="band" id="filter">
+    <div class="wrap">
+      <div class="band-head">
+        <span class="idx">01</span>
+        <h2>The filter</h2>
+        <span class="src">eskf.cpp · 739 lines, no dependencies</span>
+      </div>
+      <div class="cols">
+        <div>
+          <table class="state-table">
+            <thead><tr><th>Error state</th><th>Dim</th><th>Units</th><th>Bounded by</th></tr></thead>
+            <tbody>
+              <tr><td class="sym">δp</td><td>3</td><td class="unit">m</td><td>GNSS position · baro (vertical)</td></tr>
+              <tr><td class="sym">δv</td><td>3</td><td class="unit">m/s</td><td>GNSS velocity · baro damping</td></tr>
+              <tr><td class="sym">δθ</td><td>3</td><td class="unit">rad</td><td>gravity when still · mag heading</td></tr>
+              <tr><td class="sym">δb<sub>g</sub></td><td>3</td><td class="unit">rad/s</td><td>averaged in the alignment window</td></tr>
+              <tr><td class="sym">δb<sub>a</sub></td><td>3</td><td class="unit">m/s²</td><td>observable once anchored</td></tr>
+              <tr><td class="sym">δb<sub>b</sub></td><td>1</td><td class="unit">m</td><td>GNSS-vs-baro altitude, weather drift</td></tr>
+            </tbody>
+          </table>
+          <div class="filter-notes">
+            <p><b>The attitude error lives in the world frame,</b> not the body.
+              That one choice makes heading error exactly the down component of
+              δθ — so the magnetometer structurally cannot corrupt roll or pitch —
+              and it makes the transition matrix <b>exact</b>: F is nilpotent, and
+              <code>Φ = I + Fdt + F²dt²/2 + F³dt³/6</code> is the full exponential,
+              not a truncation.</p>
+            <p><b>Every update is Joseph-form</b> with a χ² gate at 99%, and the
+              baro noise model inflates with speed² and through the transonic —
+              driven by the estimated state, never by flight-phase logic.</p>
+            <p><b>Altitude never waits for GNSS.</b> The baro-damped vertical
+              channel runs from the end of alignment, indoors or out; a late fix
+              upgrades to full navigation with the altitude kept continuous.</p>
+          </div>
+        </div>
+        <figure class="matrix-fig">
+          <div class="fig-frame">
+            <svg id="mxSvg" viewBox="0 0 470 452" width="470" height="452" style="width:100%; max-width:470px; height:auto; display:block; margin:0 auto"
+                 role="img" aria-label="Block structure of the 16 by 16 error-state covariance matrix. Diagonal blocks are state variances; hatched off-diagonal blocks are couplings created by the transition matrix; orange-framed cells are directly measured."></svg>
+          </div>
+          <div class="mx-note" id="mxNote">
+            <b>FIG. 02 — covariance P, block structure</b>
+            <span id="mxNoteText">Hover a block. Solid diagonal — state variance.
+            Hatched — coupled by the exact transition Φ. Orange frame — written
+            directly by a measurement.</span>
+          </div>
+          <div class="mx-legend" aria-hidden="true">
+            <span><i class="sw solid"></i> variance</span>
+            <span><i class="sw hatch"></i> Φ coupling</span>
+            <span><i class="sw meas"></i> measured</span>
+          </div>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 02 FLIGHT SEQUENCE ================= -->
+  <section class="band" id="sequence">
+    <div class="wrap">
+      <div class="band-head">
+        <span class="idx">02</span>
+        <h2>Flight sequence</h2>
+        <span class="src">FiltState — the enum, verbatim</span>
+      </div>
+      <div class="seq">
+        <div class="placard">
+          <span class="fs">FS_0</span>
+          <h3>Init</h3>
+          <p>Power on. The first IMU sample arms the filter and starts the clock.</p>
+        </div>
+        <div class="placard">
+          <span class="fs">FS_1</span>
+          <h3>Align</h3>
+          <p>2.5 s of measured stillness. Gravity gives tilt, the mag gives heading,
+             and the averaged gyro rate <em>is</em> the calibration.</p>
+        </div>
+        <div class="placard">
+          <span class="fs">FS_2</span>
+          <h3>Wait fix</h3>
+          <p>Attitude and the baro vertical channel run. The first valid GNSS fix
+             anchors the world origin.</p>
+        </div>
+        <div class="placard">
+          <span class="fs">FS_3</span>
+          <h3>Run</h3>
+          <p>Full 3-D navigation: position, velocity, attitude, and three bias
+             estimates, output at 50 Hz.</p>
+        </div>
+        <div class="placard branch last">
+          <span class="fs">FS_4</span>
+          <h3>Att-only</h3>
+          <p>No fix in 20 s? Fly on attitude + baro altitude. Nothing blocks
+             on the sky.</p>
+        </div>
+      </div>
+      <p class="seq-foot">The branch heals itself: a fix arriving in FS_4 anchors
+        late and upgrades <b>4 → 3</b>, rebuilding position and re-seeding the baro
+        bias so altitude stays continuous — a late anchor is identical to an
+        on-time one.</p>
+    </div>
+  </section>
+
+  <!-- ================= 03 GROUND STATION ================= -->
+  <section class="band console-band" id="ground">
+    <div class="wrap">
+      <div class="band-head">
+        <span class="idx" style="color:var(--flame)">03</span>
+        <h2>Ground station</h2>
+        <span class="src">viewer/index.html · one file, no libraries</span>
+      </div>
+
+      <div class="ndjson" aria-label="Sample of the live telemetry stream">
+        <div class="line"><span class="k">{"t":</span><span class="s">"hdr"</span><span class="k">,"fw":</span><span class="v">"1.0.0"</span><span class="k">,"sch":</span><span class="v">1</span><span class="k">,"imu":</span><span class="v">1</span><span class="k">,"mag":</span><span class="v">1</span><span class="k">,"bar":</span><span class="v">1</span><span class="k">,"gps":</span><span class="v">1</span><span class="k">,"iodr":</span><span class="v">400</span><span class="k">,"mmode":</span><span class="v">"cont"</span><span class="k">,"gmode":</span><span class="v">"auto"</span><span class="k">}</span></div>
+        <div class="line"><span class="k">{"t":</span><span class="s">"msg"</span><span class="k">,"txt":</span><span class="v">"cal: averaging gyro + gravity (hold still)"</span><span class="k">}</span></div>
+        <div class="line"><span class="k">{"t":</span><span class="s">"cal"</span><span class="k">,"bg":</span><span class="v">[0.4584,-0.6875,0.2865]</span><span class="k">,"eul":</span><span class="v">[0.11,-0.23,1.5]</span><span class="k">,"alq":</span><span class="v">1</span><span class="k">,"dur":</span><span class="v">3.01</span><span class="k">}</span></div>
+        <div class="line"><span class="k">{"t":</span><span class="s">"st"</span><span class="k">,"fst":</span><span class="v">3</span><span class="k">,"lat":</span><span class="v">40.1164012</span><span class="k">,"lon":</span><span class="v">-88.2433975</span><span class="k">,"alt":</span><span class="v">223.1</span><span class="k">,"ral":</span><span class="v">2.7</span><span class="k">,"rvs":</span><span class="v">0.05</span><span class="k">,"q":</span><span class="v">[0.9998,0.002,-0.001,0.02]</span><span class="k">,"sp":</span><span class="v">[0.5,0.5,0.7]</span><span class="k">,"nbr":</span><span class="v">9.8</span><span class="k">,"kbr":</span><span class="v">0</span><span class="k">, …}</span></div>
+      </div>
+      <div class="ndjson-cap">
+        <span>NDJSON · EVERY FIELD DOCUMENTED IN <a href="../SCHEMA.md">SCHEMA.MD</a> · NOTHING UNDOCUMENTED EMITTED</span>
+        <span>90-COLUMN CSV EXPORT</span>
+      </div>
+
+      <div class="gs-grid">
+        <div class="gs-cell"><h3>Web Serial</h3>
+          <p>Double-click the file, pick the port. Line-buffered parsing
+             <b>resynchronizes mid-stream</b> — attach at any byte.</p></div>
+        <div class="gs-cell"><h3>Live plots</h3>
+          <p>Altitude, rates, biases, innovations and <b>χ² NIS with rejection
+             marks</b> — the filter argues its own health.</p></div>
+        <div class="gs-cell"><h3>3-D attitude</h3>
+          <p>Hand-rolled renderer, orbit camera, <b>your own STL</b> decimated to
+             a closed surface — no wireframes.</p></div>
+        <div class="gs-cell"><h3>Pad-anchored map</h3>
+          <p>Satellite tiles with metric range rings, live track,
+             <b>distance and bearing from the pad</b>.</p></div>
+        <div class="gs-cell"><h3>Session capture</h3>
+          <p>Pause, scroll back, export <b>CSV or raw JSONL</b>. Disconnect and
+             reconnect without a reload.</p></div>
+        <div class="gs-cell"><h3>Visible degradation</h3>
+          <p>Stale badges and dashes, never invented numbers. If a sensor dies,
+             <b>the page says so</b>.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 04 VERIFICATION ================= -->
+  <section class="band" id="verify">
+    <div class="wrap">
+      <div class="band-head">
+        <span class="idx">04</span>
+        <h2>Verification</h2>
+        <span class="src">test/eskf_test.cpp · viewer/parse_test.js</span>
+      </div>
+      <div class="verify-wrap">
+        <table class="verify-table">
+          <thead><tr><th>Item</th><th>Method</th><th>Result</th><th>Call</th></tr></thead>
+          <tbody>
+            <tr><td>Filter, six scenarios</td>
+                <td>Native host build, truth simulation: static, mag-off, GPS-less,
+                    nose-up gimbal lock, 400 m GPS-less climb</td>
+                <td class="r">63 / 63</td><td><span class="go">GO</span></td></tr>
+            <tr><td>Baro latency model</td>
+                <td>40 m/s steady climb; innovation mean with compensation</td>
+                <td class="r">0.06 m vs 0.80 m</td><td><span class="go">GO</span></td></tr>
+            <tr><td>Late-anchor continuity</td>
+                <td>Anchor at 400 m AGL; baro acceptance after bias re-seed</td>
+                <td class="r">50 / 50 accepted</td><td><span class="go">GO</span></td></tr>
+            <tr><td>Stream parser</td>
+                <td>Replay file with torn, malformed and future records</td>
+                <td class="r">31 / 31</td><td><span class="go">GO</span></td></tr>
+            <tr><td>Firmware build</td>
+                <td>arduino-cli, GENERIC_F722RETX</td>
+                <td class="r">102 576 B / 17 712 B</td><td><span class="go">GO</span></td></tr>
+            <tr><td>First flight</td>
+                <td>—</td>
+                <td class="r">awaiting vehicle</td><td><span class="hold">HOLD</span></td></tr>
+          </tbody>
+        </table>
+        <div class="stamp" role="note" aria-label="Status: bench verified, not yet flown">
+          <div class="big">Bench-<br>verified</div>
+          <div class="small">Not yet flown</div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <table class="manifest" aria-label="Repository manifest">
+      <tbody>
+        <tr><td class="f">firmware/RocketNav/eskf.cpp</td><td class="d">the filter — platform-free, compiles on target and host</td></tr>
+        <tr><td class="f">firmware/RocketNav/icm45686.cpp</td><td class="d">hand-written IMU driver, register level</td></tr>
+        <tr><td class="f">firmware/RocketNav/RocketNav.ino</td><td class="d">cooperative scheduler — sensor I/O never stalls the filter</td></tr>
+        <tr><td class="f">viewer/index.html</td><td class="d">the entire ground station, one file</td></tr>
+        <tr><td class="f">DESIGN.md</td><td class="d">why every equation is the way it is</td></tr>
+        <tr><td class="f">SCHEMA.md</td><td class="d">the telemetry contract, field by field</td></tr>
+      </tbody>
+    </table>
+    <div class="colophon">
+      <span>RN-01 · ROCKETNAV · 2026</span>
+      <span>SET IN BARLOW CONDENSED, ARCHIVO &amp; IBM PLEX MONO</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+/* FIG. 02 — build the 16x16 covariance block figure from the real
+   error-state index map: p 0-2, v 3-5, th 6-8, bg 9-11, ba 12-14, bb 15. */
+(function () {
+  const svg = document.getElementById("mxSvg");
+  const note = document.getElementById("mxNoteText");
+  const NS = "http://www.w3.org/2000/svg";
+  const C = 24, OX = 52, OY = 34;           // cell size, grid origin
+  const G = [                                // block groups
+    { k: "p",  i: 0,  n: 3, lbl: "δp" },
+    { k: "v",  i: 3,  n: 3, lbl: "δv" },
+    { k: "th", i: 6,  n: 3, lbl: "δθ" },
+    { k: "bg", i: 9,  n: 3, lbl: "δbg" },
+    { k: "ba", i: 12, n: 3, lbl: "δba" },
+    { k: "bb", i: 15, n: 1, lbl: "δbb" },
+  ];
+  const el = (t, a) => {
+    const e = document.createElementNS(NS, t);
+    for (const k in a) e.setAttribute(k, a[k]);
+    return e;
+  };
+  const defs = el("defs", {});
+  const pat = el("pattern", { id: "hx", width: 5, height: 5,
+    patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)" });
+  pat.appendChild(el("line", { x1: 0, y1: 0, x2: 0, y2: 5,
+    stroke: "#191B1D", "stroke-width": 1.1, opacity: .5 }));
+  defs.appendChild(pat);
+  svg.appendChild(defs);
+
+  const px = i => OX + i * C, py = i => OY + i * C;
+  const byK = {}; G.forEach(g => byK[g.k] = g);
+
+  // group labels + brackets
+  G.forEach(g => {
+    const mid = px(g.i) + g.n * C / 2;
+    const t1 = el("text", { x: mid, y: OY - 12, "text-anchor": "middle",
+      "font-size": 11.5, fill: "#191B1D" });
+    t1.textContent = g.lbl; svg.appendChild(t1);
+    const t2 = el("text", { x: OX - 12, y: py(g.i) + g.n * C / 2 + 4,
+      "text-anchor": "end", "font-size": 11.5, fill: "#191B1D" });
+    t2.textContent = g.lbl; svg.appendChild(t2);
+  });
+
+  const DEFAULT = "Hover a block. Solid diagonal — state variance. Hatched — " +
+    "coupled by the exact transition Φ. Orange frame — written directly by a measurement.";
+
+  function block(a, b, fill, title, text, cls) {
+    const A = byK[a], B = byK[b];
+    const g = el("g", {});
+    g.dataset.note = title + "|" + text;
+    const r = el("rect", { x: px(B.i), y: py(A.i), width: B.n * C,
+      height: A.n * C, fill: fill, stroke: "#191B1D", "stroke-width": 1,
+      class: "blk" + (cls ? " " + cls : "") });
+    g.appendChild(r);
+    svg.appendChild(g);
+    const set = () => {
+      note.textContent = text;
+      svg.querySelectorAll("[data-note]").forEach(x => x.classList.remove("on"));
+      g.classList.add("on");
+    };
+    const clear = () => {
+      note.textContent = DEFAULT;
+      g.classList.remove("on");
+    };
+    g.addEventListener("mouseenter", set);
+    g.addEventListener("mouseleave", clear);
+    g.addEventListener("click", set);
+  }
+  function pairSym(a, b, t, s) {
+    block(a, b, "url(#hx)", t, s);
+    const A = byK[a], B = byK[b];
+    const g = el("g", {});
+    const r = el("rect", { x: px(A.i), y: py(B.i), width: A.n * C,
+      height: B.n * C, fill: "url(#hx)", stroke: "#191B1D",
+      "stroke-width": 1, class: "blk" });
+    g.appendChild(r); svg.appendChild(g);
+    g.addEventListener("mouseenter", () => { note.textContent = s; });
+    g.addEventListener("mouseleave", () => { note.textContent = DEFAULT; });
+    g.addEventListener("click", () => { note.textContent = s; });
+  }
+
+  // diagonal variances
+  block("p", "p", "#191B1D", "P·δp δp", "Position variance, m². GNSS bounds all three axes; the vertical entry is additionally baro-damped, so it converges below a meter even before a fix.");
+  block("v", "v", "#191B1D", "P·δv δv", "Velocity variance. GNSS Doppler holds it near 0.1 m/s; during accelerometer saturation its process noise inflates ×400 to degrade gracefully.");
+  block("th", "th", "#191B1D", "P·δθ δθ", "Attitude variance in the world frame. The down entry is heading — bounded only by the magnetometer, honestly wide when the mag is off.");
+  block("bg", "bg", "#191B1D", "P·δbg δbg", "Gyro bias variance. Seeded by the 2.5 s alignment average, then random-walks at the datasheet tempco.");
+  block("ba", "ba", "#191B1D", "P·δba δba", "Accel bias variance. Unobservable on the pad along gravity — the filter says so instead of pretending.");
+  block("bb", "bb", "#191B1D", "P·δbb δbb", "Baro bias variance, m². Re-seeded at the origin anchor so a late fix keeps the altitude continuous.");
+
+  // Phi couplings (symmetric pairs)
+  pairSym("p", "v", "p ← v", "Position integrates velocity: Φ couples the blocks by dt. This cross-term is how a GNSS position update also corrects velocity.");
+  pairSym("v", "th", "v ← δθ", "Tilt error rotates gravity into the wrong axis: the −[f]×dt term. It is why the filter can level itself from accelerometer evidence alone.");
+  pairSym("v", "ba", "v ← ba", "Accelerometer bias integrates into velocity through −R·dt — anchored flight makes the bias observable.");
+  pairSym("th", "bg", "δθ ← bg", "Gyro bias integrates into attitude through −R·dt. The alignment seed keeps this small from the first second.");
+  pairSym("p", "th", "p ← δθ", "Second-order: tilt reaches position at dt²/2. Kept because Φ is the exact exponential, not a first-order truncation.");
+  pairSym("p", "ba", "p ← ba", "Second-order accelerometer-bias term, dt²/2 — exact, not truncated.");
+  pairSym("v", "bg", "v ← bg", "Second-order: gyro bias tilts the frame and the tilt integrates into velocity — the A·B·dt²/2 block.");
+  pairSym("p", "bg", "p ← bg", "Third-order: gyro bias reaches position at dt³/6. F is nilpotent, so even this term is exact.");
+
+  // measurement frames
+  const meas = [
+    { x: px(0), y: py(0), w: 3 * C, h: 3 * C, t: "GNSS position writes the δp block (3 dof, χ² gate 11.34)." },
+    { x: px(3), y: py(3), w: 3 * C, h: 3 * C, t: "GNSS velocity writes the δv block (3 dof)." },
+    { x: px(8), y: py(8), w: C, h: C, t: "The magnetometer writes exactly one number: heading, the down component of δθ. It cannot touch roll or pitch." },
+    { x: px(2), y: py(2), w: C, h: C, t: "Baro altitude writes δp_D…" },
+    { x: px(15), y: py(15), w: C, h: C, t: "…and δbb: the measurement is −p_D + bb." },
+    { x: px(15), y: py(2), w: C, h: C, t: "The baro cross-term p_D–bb: how baro damps vertical velocity without fighting GNSS altitude." },
+    { x: px(2), y: py(15), w: C, h: C, t: "The baro cross-term (symmetric)." },
+  ];
+  meas.forEach(m => {
+    const g = el("g", {});
+    const r = el("rect", { x: m.x + 1.5, y: m.y + 1.5, width: m.w - 3,
+      height: m.h - 3, fill: "none", stroke: "#E04A0C",
+      "stroke-width": 2, class: "blk" });
+    g.appendChild(r); svg.appendChild(g);
+    g.addEventListener("mouseenter", () => { note.textContent = m.t; });
+    g.addEventListener("mouseleave", () => { note.textContent = DEFAULT; });
+    g.addEventListener("click", () => { note.textContent = m.t; });
+  });
+
+  // outer frame + fine grid
+  for (let i = 0; i <= 16; i++) {
+    svg.appendChild(el("line", { x1: px(i), y1: OY, x2: px(i), y2: py(16),
+      stroke: "#191B1D", opacity: i % 3 === 0 || i > 14 ? .35 : .12, "stroke-width": .7 }));
+    svg.appendChild(el("line", { x1: OX, y1: py(i), x2: px(16), y2: py(i),
+      stroke: "#191B1D", opacity: i % 3 === 0 || i > 14 ? .35 : .12, "stroke-width": .7 }));
+  }
+  svg.appendChild(el("rect", { x: OX, y: OY, width: 16 * C, height: 16 * C,
+    fill: "none", stroke: "#191B1D", "stroke-width": 2 }));
+  const cap = el("text", { x: OX, y: py(16) + 26, "font-size": 10.5,
+    fill: "#575C5F", "letter-spacing": 1.2 });
+  cap.textContent = "16 × 16 · SYMMETRIC · JOSEPH-FORM UPDATES · FLOAT32";
+  svg.appendChild(cap);
+})();
+</script>
+</body>
+</html>

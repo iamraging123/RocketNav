@@ -1,0 +1,6 @@
+# build artifacts (arduino-cli --output-dir)
+firmware/build/
+
+# host-test binaries (zig c++ outputs)
+test/*.exe
+test/*.pdb
