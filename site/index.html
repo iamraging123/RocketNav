@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RocketNav RN-01</title>
-<meta name="description" content="RocketNav — a rocket navigation computer built from first principles: 16-state error-state Kalman filter, STM32F7 firmware, single-file ground station.">
+<meta name="description" content="RocketNav — a rocket navigation computer built from first principles: 16-state error-state Kalman filter, STM32F7 firmware, LoRa telemetry link, single-file ground station.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -311,7 +311,8 @@
     <h1>Rocket<span class="thin">Nav</span></h1>
     <p class="lede">A rocket navigation computer built from first principles — a
       16-state error-state Kalman filter on an STM32F7, a hand-written IMU driver,
-      and a single-file ground station. <em>No fusion libraries.</em>
+      a LoRa telemetry link, and a single-file ground station.
+      <em>No fusion libraries.</em>
       Every equation is in the repo, and every claim below is tested.</p>
     <nav class="cover-links" aria-label="Project documents">
       <a href="../viewer/index.html">Open the ground station</a>
@@ -383,8 +384,9 @@
       <li><span class="n">400 Hz</span><span class="u">filter loop, DRDY-gated</span></li>
       <li><span class="n">16</span><span class="u">error states estimated</span></li>
       <li><span class="n">25 Hz</span><span class="u">baro fusion, latency-compensated</span></li>
-      <li><span class="n">102 576 B</span><span class="u">flash — 19% of the F722</span></li>
-      <li><span class="n">63 / 63</span><span class="u">host checks passing</span></li>
+      <li><span class="n">145 612 B</span><span class="u">flash — 28% of the F722</span></li>
+      <li><span class="n">280 / 280</span><span class="u">host checks passing</span></li>
+      <li><span class="n">4 Hz</span><span class="u">LoRa downlink · 433.5 MHz</span></li>
     </ul>
   </div>
 </header>
@@ -514,9 +516,10 @@
       </div>
 
       <div class="gs-grid">
-        <div class="gs-cell"><h3>Web Serial</h3>
-          <p>Double-click the file, pick the port. Line-buffered parsing
-             <b>resynchronizes mid-stream</b> — attach at any byte.</p></div>
+        <div class="gs-cell"><h3>USB or LoRa</h3>
+          <p>Pick <b>USB</b> for the rocket's 50 Hz stream or <b>LoRa</b> for the
+             ESP32-C3 base station's 4 Hz bridge — same records, same page.
+             Line-buffered parsing resynchronizes mid-stream.</p></div>
         <div class="gs-cell"><h3>Live plots</h3>
           <p>Altitude, rates, biases, innovations and <b>χ² NIS with rejection
              marks</b> — the filter argues its own health.</p></div>
@@ -551,7 +554,7 @@
             <tr><td>Filter, six scenarios</td>
                 <td>Native host build, truth simulation: static, mag-off, GPS-less,
                     nose-up gimbal lock, 400 m GPS-less climb</td>
-                <td class="r">63 / 63</td><td><span class="go">GO</span></td></tr>
+                <td class="r">91 / 91</td><td><span class="go">GO</span></td></tr>
             <tr><td>Baro latency model</td>
                 <td>40 m/s steady climb; innovation mean with compensation</td>
                 <td class="r">0.06 m vs 0.80 m</td><td><span class="go">GO</span></td></tr>
@@ -560,10 +563,14 @@
                 <td class="r">50 / 50 accepted</td><td><span class="go">GO</span></td></tr>
             <tr><td>Stream parser</td>
                 <td>Replay file with torn, malformed and future records</td>
-                <td class="r">31 / 31</td><td><span class="go">GO</span></td></tr>
+                <td class="r">41 / 41</td><td><span class="go">GO</span></td></tr>
             <tr><td>Firmware build</td>
                 <td>arduino-cli, GENERIC_F722RETX</td>
-                <td class="r">102 576 B / 17 712 B</td><td><span class="go">GO</span></td></tr>
+                <td class="r">145 612 B / 20 072 B</td><td><span class="go">GO</span></td></tr>
+            <tr><td>LoRa link</td>
+                <td>Bench, 433.5 MHz SF7 / 500 kHz: rocket Ra-02 ⇄ ESP32-C3 base
+                    station, 4 Hz downlink with command uplink</td>
+                <td class="r">0 % loss · 6 / 6 uplinks</td><td><span class="go">GO</span></td></tr>
             <tr><td>First flight</td>
                 <td>—</td>
                 <td class="r">awaiting vehicle</td><td><span class="hold">HOLD</span></td></tr>

@@ -81,6 +81,10 @@
     font: inherit; font-size: 11px; padding: 3px 9px; cursor: pointer;
     letter-spacing: .04em; }
   .lmode button.on { background: var(--text); color: var(--bg); }
+  .lmode .lbl { padding: 3px 5px 3px 8px; color: var(--dim2); font-size: 10px;
+    letter-spacing: .09em; text-transform: uppercase; align-self: center; }
+  #loraBar { display: none; }
+  #loraBar.on { display: flex; }
   .badge.bad, .badge.bad b { color: var(--bad); border-color: var(--bad); }
   .badge.sim { border-color: var(--bad); color: var(--bad); }
   input[type=range] { flex: 1; min-width: 120px; accent-color: var(--dim); }
@@ -257,8 +261,8 @@
 
 <div class="bar">
   <span id="conndot" class="dot"></span>
-  <span class="lmode" title="USB = rocket serial (50 Hz full stream). LoRa = ESP32-C3 base station (4 Hz bridged stream, same records)."><button id="lmUsb">USB</button><button id="lmLora">LoRa</button></span>
-  <button id="btnConnect">Connect</button>
+  <span class="lmode" title="USB = rocket serial (50 Hz full stream, FTDI adapter). LoRa = ESP32-C3 base station (4 Hz bridged stream, same records). The choice filters the port chooser and is remembered."><span class="lbl">link</span><button id="lmUsb">USB</button><button id="lmLora">LoRa</button></span>
+  <button id="btnConnect">Connect USB</button>
   <button id="btnDemo" class="secondary">Demo</button>
   <span class="badge" id="bFw"><b>&mdash;</b> fw</span>
   <span class="badge" id="bState">state <b>&mdash;</b></span>
@@ -280,6 +284,20 @@
 </div>
 
 <div id="staleBar">NO DATA &mdash; <span id="staleAge">0</span> s</div>
+
+<div class="bar" id="loraBar">
+  <span class="badge" id="lbDown" title="LIVE = state frames within 2 s. QUIET / MUTED? = the base station hears nothing: the rocket boots with the downlink muted, so Unmute is the usual answer.">downlink <b>&mdash;</b></span>
+  <button id="lbUnmute" class="secondary mini" title="$lora 1 &mdash; start the rocket's 4 Hz downlink (boots muted). Antenna on the rocket first.">Unmute</button>
+  <button id="lbMute" class="secondary mini" title="$lora 0 &mdash; stop the downlink">Mute</button>
+  <button id="lbPing" class="secondary mini" title="$ping &mdash; round trip base &rarr; rocket &rarr; base, timed to the pong">Ping</button>
+  <button id="lbLoraQ" class="secondary mini" title="$lora? &mdash; rocket-side link counters, answered over RF">Rocket link</button>
+  <button id="lbBaseQ" class="secondary mini" title="$base? &mdash; base-station counters (answered locally, no transmission)">Base</button>
+  <span class="badge" id="lbRssi" title="RSSI of the last frame at the base station">rssi <b>&mdash;</b> dBm</span>
+  <span class="badge" id="lbSnr">snr <b>&mdash;</b> dB</span>
+  <span class="badge" id="lbLoss" title="Frames the base station missed, from air sequence gaps">air loss <b>&mdash;</b></span>
+  <span class="badge" id="lbRate">frames <b>&mdash;</b> Hz</span>
+  <span class="badge" id="lbRtt" title="$ping round trip, last measured">ping <b>&mdash;</b></span>
+</div>
 
 <div class="bar">
   <button id="btnPause" class="secondary" disabled>Pause</button>
@@ -539,6 +557,8 @@
             <tr><td class="k">data age</td><td id="cAge" class="r">&mdash;</td></tr>
             <tr><td class="k">RSSI</td><td id="cRssi" class="r">&mdash;</td></tr>
             <tr><td class="k">SNR</td><td id="cSnr" class="r">&mdash;</td></tr>
+            <tr><td class="k">air loss (base)</td><td id="cAirLoss" class="r">&mdash;</td></tr>
+            <tr><td class="k">ping round trip</td><td id="cRtt" class="r">&mdash;</td></tr>
           </table>
         </div>
         <div class="panel">
@@ -682,6 +702,7 @@ const S = {
   rxWall: [],                        // arrival wall-clock times, rate window
   byteWin: [],                       // {w, b} rolling window for throughput
   lastRxWall: 0,
+  pingSentAt: 0, pingRtt: null,      // $ping round trip (ms), any link
 };
 
 function resetSession() {
@@ -694,6 +715,7 @@ function resetSession() {
   S.maxRal = null; S.maxRalT = null; S.maxAcc = null; DIAL.fs = 4;
   if (MAP.anchor && MAP.anchor.src !== "manual") MAP.anchor = null;
   S.rxWall = []; S.lastRxWall = 0; S.byteWin = [];
+  S.pingSentAt = 0; S.pingRtt = null;
   S.consoleLines = []; S.consoleDirty = true;
   // Linkage tables belong to the CONNECTION: stale ones from a previous
   // rocket/boot invite calibration decisions against the wrong fin data.
@@ -1448,6 +1470,10 @@ function handleLine(line) {
   if (p.kind === "msg") {
     S.msgs.push(p.rec);
     if (p.rec.txt) logCmd("< " + p.rec.txt);
+    if (p.rec.txt === "cmd: pong" && S.pingSentAt) {
+      S.pingRtt = performance.now() - S.pingSentAt;  // LoRa: base->rocket->base
+      S.pingSentAt = 0;
+    }
     if (S.msgs.length > 40) S.msgs.shift();
     S.bootDirty = true;
     return;
@@ -1572,7 +1598,8 @@ function updateDevice() {
       chip("baro", h.bar, h.bar ? "ok" : "bad") + chip("gps", h.gps, h.gps ? "ok" : "bad"));
     T("dImu", `${h.iodr} Hz · ±${h.afs} g · ±${h.gfs} dps`);
     T("dMagBar", `${h.modr} Hz ${h.mmode} / ${h.bhz} Hz`);
-    T("dGnss", `${h.gmode} ${h.ghz} Hz / ${h.ohz} Hz out`);
+    T("dGnss", h.mode === "lora" ? `via base station · ${h.ohz} Hz out`
+                              : `${h.gmode} ${h.ghz} Hz / ${h.ohz} Hz out`);
     T("dFw", `${h.fw} / sch ${h.sch}`);
   }
   const o = S.org;
@@ -1606,8 +1633,8 @@ function updateDom() {
   bA.className = "badge" + (age !== null && age > 2 ? " bad" : "");
   HT("bRec", `recs <b>${S.recCount}</b>`);
   HT("bErr", `err <b>${S.parseErr}</b>`);
-  if (S.hdr) HT("bFw", `<b>${S.hdr.fw}</b> sch${S.hdr.sch} · fw`);
-  if (S.hdr) {
+  if (S.hdr) HT("bFw", `<b>${S.hdr.fw}</b> sch${S.hdr.sch !== undefined ? S.hdr.sch : (S.hdr.schema || "?")} · fw`);
+  if (S.hdr && S.hdr.mmode) {
     HT("bMag", `mag <b>${S.hdr.mmode}</b>` +
       (S.hdr.gmode ? ` · gps <b>${S.hdr.gmode}</b>` : ""));
   }
@@ -1615,7 +1642,9 @@ function updateDom() {
   T("hRx", rxHz === null ? "—" : `${rxHz.toFixed(1)} Hz`);
 
   // Comms tab link panel
-  T("cLink", S.connected ? "USB serial · 921 600 Bd"
+  const loraStream = !!(S.hdr && S.hdr.mode === "lora");
+  T("cLink", S.connected ? (loraStream ? "LoRa via base station · 4 Hz"
+                                       : "USB serial · 921 600 Bd")
            : S.sim ? "demo" : "—");
   T("cRate", rxHz === null ? "—" : rxHz.toFixed(1) + " Hz");
   let bps = null;
@@ -1644,6 +1673,35 @@ function updateDom() {
       ? fmt(rr0.rssi, 0) + " dBm" : "—");
   T("cSnr", rr0 && rr0.snr !== undefined && rr0.snr !== null
       ? fmt(rr0.snr, 1) + " dB" : "—");
+  T("cAirLoss", rr0 && rr0.loss !== undefined && rr0.loss !== null
+      ? fmt(rr0.loss, 1) + " %" : "—");
+  T("cRtt", S.pingRtt === null ? "—" : S.pingRtt.toFixed(0) + " ms");
+
+  // LoRa bar: shown whenever LoRa is selected or the stream is the base
+  // station's. Downlink LIVE = a frame within 2 s; otherwise QUIET (or
+  // MUTED? before the first frame - the rocket boots muted).
+  const loraUi = S.linkPref === "lora" || loraStream;
+  $("loraBar").classList.toggle("on", loraUi);
+  if (loraUi) {
+    let dtxt = "—", dbad = false;
+    if (S.connected && loraStream) {
+      if (age !== null && age < 2) dtxt = "LIVE";
+      else { dtxt = S.lastRxWall ? "QUIET" : "MUTED?"; dbad = true; }
+    } else if (S.connected && S.hdr) {
+      dtxt = "usb stream"; dbad = true;  // wrong port for this selector
+    }
+    const dl = $("lbDown");
+    dl.innerHTML = `downlink <b>${dtxt}</b>`;
+    dl.classList.toggle("bad", dbad);
+    const lr = rr0 && loraStream ? rr0 : null;
+    HT("lbRssi", `rssi <b>${lr && lr.rssi != null ? fmt(lr.rssi, 0) : "—"}</b> dBm`);
+    HT("lbSnr", `snr <b>${lr && lr.snr != null ? fmt(lr.snr, 1) : "—"}</b> dB`);
+    HT("lbLoss", `air loss <b>${lr && lr.loss != null ? fmt(lr.loss, 1) + " %" : "—"}</b>`);
+    HT("lbRate", `frames <b>${loraStream && rxHz !== null ? rxHz.toFixed(1) : "—"}</b> Hz`);
+    HT("lbRtt", `ping <b>${S.pingRtt === null ? "—" : S.pingRtt.toFixed(0) + " ms"}</b>`);
+    for (const id of ["lbUnmute", "lbMute", "lbPing", "lbLoraQ", "lbBaseQ"])
+      $(id).disabled = !S.connected;
+  }
 
   if (S.bootDirty && ($("bootLog") || $("calBg"))) {
     S.bootDirty = false;
@@ -2159,6 +2217,8 @@ function logCmd(t) {
 let txChain = Promise.resolve();
 function sendCmd(line) {
   logCmd("> " + line);
+  if (S.hdr && S.hdr.mode === "lora" && line.length > 48)
+    logCmd("< note: the LoRa uplink carries 48 chars - command will be cut");
   if (S.sim) { logCmd("< sim (no device)"); return; }
   if (!S.connected || !port || !port.writable) {
     logCmd("< not connected");
@@ -2179,7 +2239,16 @@ function sendCmd(line) {
 }
 const hex2rgb = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16),
                       parseInt(h.slice(5, 7), 16)];
-$("cmdPing").onclick = () => sendCmd("$ping");
+function sendPing() {
+  S.pingSentAt = performance.now(); S.pingRtt = null;
+  sendCmd("$ping");
+}
+$("cmdPing").onclick = sendPing;
+$("lbPing").onclick = sendPing;
+$("lbUnmute").onclick = () => sendCmd("$lora 1");
+$("lbMute").onclick = () => sendCmd("$lora 0");
+$("lbLoraQ").onclick = () => sendCmd("$lora?");
+$("lbBaseQ").onclick = () => sendCmd("$base?");
 $("cmdCal").onclick = () => sendCmd("$cal");
 $("cmdZero").onclick = () => sendCmd("$zero");
 $("cmdMagCal").onclick = () => sendCmd("$magcal");
@@ -2527,7 +2596,13 @@ async function connect() {
         port = await navigator.serial.requestPort();
       }
     } else {
-      port = await navigator.serial.requestPort();
+      try {
+        // the rocket's UART adapter is FTDI: the chooser lists only those
+        port = await navigator.serial.requestPort(
+            { filters: [{ usbVendorId: 0x0403 }] });
+      } catch (e) {
+        port = await navigator.serial.requestPort();
+      }
     }
     await port.open({ baudRate: 921600 });
   } catch (e) { return; }
@@ -2573,7 +2648,7 @@ async function disconnect() {
   port = null;
   S.connected = false;
   $("conndot").classList.remove("on");
-  $("btnConnect").textContent = "Connect";
+  $("btnConnect").textContent = connectLabel();
 }
 
 $("btnConnect").onclick = () => S.connected ? disconnect() : connect();
@@ -2583,11 +2658,15 @@ $("btnConnect").onclick = () => S.connected ? disconnect() : connect();
    filter and the expectation shown in the link badge. */
 S.linkPref = "usb";
 try { S.linkPref = localStorage.getItem("rn_link") || "usb"; } catch (e) {}
+function connectLabel() {
+  return `Connect ${S.linkPref === "lora" ? "LoRa" : "USB"}`;
+}
 function setLinkPref(m) {
   S.linkPref = m;
   try { localStorage.setItem("rn_link", m); } catch (e) {}
   $("lmUsb").classList.toggle("on", m === "usb");
   $("lmLora").classList.toggle("on", m === "lora");
+  if (!S.connected) $("btnConnect").textContent = connectLabel();
 }
 $("lmUsb").onclick = () => setLinkPref("usb");
 $("lmLora").onclick = () => setLinkPref("lora");
