@@ -12,7 +12,8 @@
 
 struct ServoConfig {
   uint8_t addr;            // PCA9685 I2C address
-  float frame_hz;          // PWM frame rate (analog servos: keep 50)
+  float frame_hz;          // PWM frame rate (spec 50; MG90S-class analog
+                           // tolerate ~100-120, digital 200-333)
   uint8_t ch[4];           // PCA channel per canard
   float center_us[4];      // linkage-neutral pulse per canard
   float us_per_deg[4];     // pulse per degree of deflection, SIGN = linkage

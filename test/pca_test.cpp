@@ -423,6 +423,23 @@ int main() {
     rng = lc;
     rng.us[0] = 480.0f;
     CHECK(!linkage::finalize(rng), "pulse outside (500,2500) us rejected");
+
+    // One-point offset save with an off-center neutral: 1200 us at 10 us/deg
+    // spans the 2100 us limit at exactly 90 deg, which the loader bound
+    // rejects - every such $lcal save failed as "table invalid". The end
+    // must be pulled in along the same line, keeping (d0,u0) and the gain.
+    for (float g : { 10.0f, -10.0f }) {
+      LinkageCal off;
+      linkage::synthOffset(off, 0.0f, 1200.0f, g, 900.0f, 2100.0f);
+      bool fin_ok = linkage::finalize(off);
+      CHECK(fin_ok, "offset table at 1200 us (gain %+.0f) finalizes", g);
+      CHECK(fabsf(linkage::deflToUs(off, 0.0f) - 1200.0f) < 0.01f &&
+                fabsf(linkage::deflToUs(off, 5.0f) - (1200.0f + 5.0f * g)) <
+                    0.01f,
+            "offset table keeps the measured neutral and the default gain");
+      CHECK(off.deg[0] > -90.0f && off.deg[1] < 90.0f,
+            "offset table ends inside the loader's +/-90 deg bound");
+    }
   }
 
   printf("== linkage: applied through the servo layer ==\n");

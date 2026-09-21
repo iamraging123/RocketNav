@@ -199,9 +199,9 @@ overlong lines are dropped and the parser resyncs at the next newline.
 | `$disarm` | any state → IDLE, canards centered. Also the abort during ARMED/ACTIVE/BENCH |
 | `$rolltest` | **ground roll-hold test** (IDLE → BENCH): runs the real roll PID immediately, no arming and no launch detect. Same preconditions as `$arm` (aligned filter, fresh IMU, PCA9685 present). Rate mode → canards fight an imposed spin; angle mode → holds the roll it started in. The flight SAFE triggers (tilt / descent / 20 s timeout) are disabled so you can handle the airframe freely; an IMU fault still drops it to SAFE. `$disarm` to stop |
 | `$ctl <kp_rate> <ki_rate> <kp_ang>` | live controller gains (RAM; echoed as `ctl:` msg ×1000) |
-| `$sframe <hz>` | live servo PWM frame rate, 24–333 Hz (IDLE only, RAM; boot default 50). The frame period is the dominant command→pulse latency: 50 Hz ⇒ up to 20 ms, digital servos at 200–333 Hz cut it ~4×. The write cadence and the write deadband rescale with it. A frame change rescales the counts of **all 16 channels**, so channels 4–15 (anything parked by `$ang`) are released (limp) rather than left outputting wrong pulses; the canards are rewritten at the new frame immediately. Reply msg reports the achieved (prescale-quantized) frame. If the reprogram sequence dies mid-way on a bus fault the chip is reported absent (health flags it, arming refuses) and the 10 Hz recovery probe re-initializes it. Analog servos may buzz or heat at high rates — watch them |
+| `$sframe <hz>` | live servo PWM frame rate, 24–333 Hz (IDLE only, RAM; boot default 100 — inside the MG90S-class analog envelope; `$sframe 50` falls back to the spec point). The frame period is the dominant command→pulse latency: 50 Hz ⇒ up to 20 ms, digital servos at 200–333 Hz cut it ~4×. The write cadence and the write deadband rescale with it. A frame change rescales the counts of **all 16 channels**, so channels 4–15 (anything parked by `$ang`) are released (limp) rather than left outputting wrong pulses; the canards are rewritten at the new frame immediately. Reply msg reports the achieved (prescale-quantized) frame. If the reprogram sequence dies mid-way on a bus fault the chip is reported absent (health flags it, arming refuses) and the 10 Hz recovery probe re-initializes it. Analog servos may buzz or heat at high rates — watch them |
 | `$ctlmode rate\|angle` | rate damping (gyro only) vs roll-angle hold (uses estimated roll; target captured at ACTIVE entry) |
-| `$lora 0\|1` / `$lora?` | mute/unmute the downlink; status msg with tx/rx/crc counters and last uplink RSSI/SNR. **Boots muted** (`LORA_TX_AT_BOOT 0`, bench default - an antenna-less Ra-02 must never transmit); RX runs regardless, so uplink commands still arrive while muted |
+| `$lora 0\|1` / `$lora?` | mute/unmute the downlink; status msg `lora: t<tx> r<rx> c<crcerr> rssi <dBm> snr <dB>[ MUTED]` (≤ 48 chars so it survives the LoRa msg frame; rssi/snr are of the last uplink frame, `n/a` until one has arrived; `lora: ABSENT …` when the radio was not found at boot). **Boots muted** (`LORA_TX_AT_BOOT 0`, bench default - an antenna-less Ra-02 must never transmit); RX runs regardless, so uplink commands still arrive while muted |
 | `$sens?` | one-line health msg: present/fresh per sensor, PCA9685, radio, I2C error counters |
 
 `$cal`, `$magcal` and `$magclr` are refused while ARMED, ACTIVE or BENCH (the
@@ -216,15 +216,19 @@ base station ESP32-C3 + Ra-02 (`basestation/`). Air profile (both ends,
 PA_BOOST. The rocket transmits one 53-byte state frame every 250 ms (~27 ms
 airtime, ~11% duty) and message frames on alternate slots when queued; it
 listens (RX-continuous) the rest of the time. The base station only
-transmits after hearing a frame, so uplinks never collide with the rocket's
-own TX. Uplink `C` frames carry a `$command` line (sent twice, deduplicated
-by sequence on the rocket) into the same command handler as USB.
+transmits 30 ms after hearing a frame (the rocket needs its next radio poll
+to re-arm RX), so uplinks never collide with the rocket's own TX; with no
+downlink heard for 400 ms (rocket muted) the uplink goes out blind. Uplink
+`C` frames carry a `$command` line (sent twice, deduplicated by sequence on
+the rocket) into the same command handler as USB.
 
 The base station emits **the same NDJSON records** on its USB serial that
 the rocket emits on its own - a slim `st` subset (attitude, rates, specific
 force, velocity, `ral`, geodetic fix, health, control state) at 4 Hz plus
 `rssi`/`snr`/`loss` measured at the base, and forwarded `msg` records — so
-the viewer connects to either port unchanged. `$base?` typed in the console
+the viewer connects to either port unchanged. Null rules mirror the USB
+record: `v` is `null` unless the filter is in RUN (`fst` 3); `ral`/`rvs` are
+`null` outside WAIT_FIX/RUN/ATT_ONLY (`fst` 2–4). `$base?` typed in the console
 reports base-side link statistics without transmitting.
 | `$magdiag` | register-level magnetometer probe, independent of the driver and its init state (~60 ms stall): replies with msg records carrying WHO_AM_I, CTRL_REG1–5 vs the intended config, STATUS, the six output registers read three ways (burst without the I²C auto-increment bit — the shelf-driver transaction shape, burst with it, and single-byte reads), a 12-poll ZYXDA/data-change liveness count, and one `magdiag: VERDICT …` line naming the likely fault class |
 | `$zero` | zeroes the sensor-drop and I²C error/reset counters |

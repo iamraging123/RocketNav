@@ -4,3 +4,4 @@ firmware/build/
 # host-test binaries (zig c++ outputs)
 test/*.exe
 test/*.pdb
+basestation/build/

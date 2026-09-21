@@ -36,13 +36,30 @@ void synthOffset(LinkageCal &lc, float d0_deg, float u0_us, float us_per_deg,
   // deflToUs(d0) == u0 exactly and the ends are the mechanical limits.
   float d_at_min = d0_deg + (min_us - u0_us) / us_per_deg;
   float d_at_max = d0_deg + (max_us - u0_us) / us_per_deg;
+  float u_at_min = min_us, u_at_max = max_us;
+  // An off-center neutral pushes one end of the full pulse span past the
+  // angle bound finalize() and the flash loader enforce (1200 us neutral at
+  // 10 us/deg reaches exactly 90 deg), which rejected every such offset
+  // save. Pull an overlong end in ALONG THE SAME LINE: gain and the
+  // (d0, u0) point are untouched, only the unreachable tail is dropped.
+  const float kEndDeg = 89.0f;
+  if (d_at_min > kEndDeg || d_at_min < -kEndDeg) {
+    float d = d_at_min > 0 ? kEndDeg : -kEndDeg;
+    u_at_min = u0_us + (d - d0_deg) * us_per_deg;
+    d_at_min = d;
+  }
+  if (d_at_max > kEndDeg || d_at_max < -kEndDeg) {
+    float d = d_at_max > 0 ? kEndDeg : -kEndDeg;
+    u_at_max = u0_us + (d - d0_deg) * us_per_deg;
+    d_at_max = d;
+  }
   lc.n = 2;
   if (d_at_min < d_at_max) {
-    lc.deg[0] = d_at_min; lc.us[0] = min_us;
-    lc.deg[1] = d_at_max; lc.us[1] = max_us;
+    lc.deg[0] = d_at_min; lc.us[0] = u_at_min;
+    lc.deg[1] = d_at_max; lc.us[1] = u_at_max;
   } else {
-    lc.deg[0] = d_at_max; lc.us[0] = max_us;
-    lc.deg[1] = d_at_min; lc.us[1] = min_us;
+    lc.deg[0] = d_at_max; lc.us[0] = u_at_max;
+    lc.deg[1] = d_at_min; lc.us[1] = u_at_min;
   }
 }
 

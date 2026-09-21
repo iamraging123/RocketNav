@@ -90,10 +90,14 @@
 
 // ---- canard servos (PCA9685BS on the shared I2C sensor bus) ---------------
 #define SERVO_PCA_ADDR 0x40      // all address straps low (verify on PCB)
-#define SERVO_FRAME_HZ 50.0f     // raise toward 200-333 for digital servos:
-                                 // cuts command->pulse latency ~4x. Try it
-                                 // live with $sframe <hz> (RAM only) before
-                                 // changing this ship default.
+#define SERVO_FRAME_HZ 100.0f    // MG90S (analog): spec point is 50 Hz, but
+                                 // the accepted analog-servo envelope runs
+                                 // to ~120 Hz (standard FBL-controller
+                                 // setting) and the frame period is the
+                                 // dominant command->pulse latency — 100 Hz
+                                 // halves it. Watch the first minutes for
+                                 // buzz/warmth: $sframe 50 reverts live.
+                                 // 200-333 Hz remains digital-servo-only.
 #define SERVO_WRITE_PER_FRAME 4  // PCA writes per PWM frame: the write latch
                                  // adds at most frame/4 on top of the frame
                                  // itself (writes still fire only on change)
@@ -115,7 +119,11 @@ static const float SERVO_US_PER_DEG[4] = { 10.0f, -10.0f, 10.0f, -10.0f };
 #define CTL_KP_ANG 8.0f          // dps of rate cmd per deg of roll error
 #define CTL_RATE_CMD_MAX 180.0f  // dps
 #define CTL_DEFL_MAX 10.0f       // deg: authority limit for first flights
-#define CTL_SLEW_DPS 400.0f      // deg/s deflection slew
+#define CTL_SLEW_DPS 600.0f      // deg/s deflection slew = the MG90S's own
+                                 // top speed (0.1 s/60 deg at 4.8 V): the
+                                 // limiter should protect the linkage, not
+                                 // out-brake the servo — at 400 it added
+                                 // ~8 ms to every full-authority correction
 // Aerodynamic mixing: sign of each canard for a +roll command.
 static const float CTL_MIX_SIGN[4] = { 1, 1, 1, 1 };
 #define CTL_LAUNCH_ACC_G 3.0f    // sustained axial accel = launch
@@ -378,8 +386,8 @@ static uint64_t monoNow() {
 static const uint32_t IMU_POLL_US = 1000000ul / IMU_POLL_HZ;
 static const uint32_t MAG_POLL_US = 1000000ul / MAG_POLL_HZ;
 static const uint32_t RADIO_POLL_US = 4000;   // 250 Hz DIO0/IRQ-flag poll
-// Servo write cadence: SERVO_WRITE_PER_FRAME per PWM frame (5 ms at the
-// 50 Hz default), so a fresh control output waits at most a quarter frame
+// Servo write cadence: SERVO_WRITE_PER_FRAME per PWM frame (2.5 ms at the
+// 100 Hz default), so a fresh control output waits at most a quarter frame
 // for its write instead of a whole one. Runtime variable: $sframe rescales
 // it together with the frame rate.
 static uint32_t servo_poll_us_ =
@@ -1267,13 +1275,24 @@ static void execCommand(char *line) {
       telem::emitMsg(now, a[0] == '0' ? "lora: muted" : "lora: transmitting");
       return;
     }
-    char lb[112];
-    snprintf(lb, sizeof(lb),
-             "lora: %s tx %lu rx %lu crcerr %lu rssi %d snr x10 %ld%s",
-             lora.present() ? "present" : "ABSENT",
+    if (!lora.present()) {
+      telem::emitMsg(now, "lora: ABSENT (SX1278 not found at boot)");
+      return;
+    }
+    // Compact so the reply survives the 48-byte LoRa msg frame when asked
+    // over RF: "lora: t99999 r9999 c999 rssi -120 snr -20.0 MUTED" = 48.
+    // rssi/snr are of the last UPLINK frame; n/a until one has arrived.
+    char rs[8] = "n/a", ss[8] = "n/a";
+    if (link::rssiValid()) {
+      snprintf(rs, sizeof(rs), "%d", (int)link::lastRssiDbm());
+      long s10 = lroundf(link::lastSnrDb() * 10.0f);
+      snprintf(ss, sizeof(ss), "%s%ld.%ld", s10 < 0 ? "-" : "",
+               labs(s10) / 10, labs(s10) % 10);
+    }
+    char lb[96];
+    snprintf(lb, sizeof(lb), "lora: t%lu r%lu c%lu rssi %s snr %s%s",
              (unsigned long)link::txCount(), (unsigned long)link::rxCount(),
-             (unsigned long)link::crcErrCount(), (int)link::lastRssiDbm(),
-             lroundf(link::lastSnrDb() * 10.0f),
+             (unsigned long)link::crcErrCount(), rs, ss,
              link::muted() ? " MUTED" : "");
     telem::emitMsg(now, lb);
     return;

@@ -37,12 +37,27 @@ static uint32_t rx_frames_ = 0, lost_frames_ = 0, crc_errs_ = 0;
 static uint32_t last_rx_ms_ = 0;
 static uint32_t next_wait_note_ms_ = 3000;
 
-// Uplink: forward once immediately, repeat once 150 ms later (the rocket
-// listens whenever it is not transmitting; the duplicate is dropped by seq).
+// Uplink, listen-after-talk: each command goes out twice (the rocket drops
+// the duplicate by seq), and each transmission waits for the NEXT downlink
+// frame to land - right after the rocket's TxDone it sits in RX for the
+// remaining ~220 ms of its 250 ms slot, so an uplink cued that way can never
+// collide with a downlink frame (an immediate uplink had a ~15 % chance of
+// costing the base one 'T' frame per transmission). The cue is NOT the
+// instant the frame lands: the rocket only discovers its own TxDone at its
+// next 250 Hz radio poll (a few ms, more when telemetry/service slots are
+// due) and only then re-arms RX - an uplink started inside that gap was
+// lost every time on the bench (6 pings -> 1 delivery). UPLINK_CUE_MS after
+// the frame the rocket is listening, and the ~10 ms uplink is long over
+// before its next slot ~220 ms later. If no downlink arrives within
+// UPLINK_BLIND_MS (rocket muted, link down) the frame goes blind so
+// `$lora 1` still reaches a silent rocket.
+#define UPLINK_CUE_MS 30
+#define UPLINK_BLIND_MS 400
 static uint8_t up_seq_ = 1;
 static uint8_t pend_[lc::kMaxFrame];
 static int pend_len_ = 0;
-static uint32_t pend_at_ms_ = 0;
+static uint8_t pend_left_ = 0;         // transmissions still owed (2, 1, 0)
+static uint32_t pend_send_at_ms_ = 0;  // earliest send time (cue or blind)
 
 static char line_[96];
 static uint8_t line_len_ = 0;
@@ -88,6 +103,24 @@ static void emitState(const lc::StateFields &f, uint8_t seq) {
   } else {
     snprintf(geo, sizeof(geo), "\"lat\":null,\"lon\":null,\"alt\":null");
   }
+  // Validity mirrors the rocket's USB record (telemetry.cpp): v is null
+  // unless the filter is in RUN (3); the vertical channel ral/rvs is null
+  // outside WAIT_FIX (2) / RUN (3) / ATT_ONLY (4). The air frame packs the
+  // raw filter numbers regardless (horizontal velocity is meaningless in
+  // attitude-only mode), so the gate has to live here.
+  char vs[56], vch[48];
+  if (f.fst == 3) {
+    snprintf(vs, sizeof(vs), "\"v\":[%.2f,%.2f,%.2f]", (double)f.vel_mps[0],
+             (double)f.vel_mps[1], (double)f.vel_mps[2]);
+  } else {
+    snprintf(vs, sizeof(vs), "\"v\":null");
+  }
+  if (f.fst >= 2 && f.fst <= 4) {
+    snprintf(vch, sizeof(vch), "\"ral\":%.1f,\"rvs\":%.2f", (double)f.ral_m,
+             (double)(-f.vel_mps[2]));
+  } else {
+    snprintf(vch, sizeof(vch), "\"ral\":null,\"rvs\":null");
+  }
   // Health: the frame carries fresh bits only; present(1)+fresh(2) when
   // fresh, bare present otherwise - the viewer's stale logic reads bit 1.
   int hi = (f.health & 1) ? 3 : 1, hm = (f.health & 2) ? 3 : 1;
@@ -97,8 +130,7 @@ static void emitState(const lc::StateFields &f, uint8_t seq) {
            "\"eul\":[%.2f,%.2f,%.2f],"
            "\"gyr\":[%.5f,%.5f,%.5f],"
            "\"acc\":[%.3f,%.3f,%.3f],"
-           "\"v\":[%.2f,%.2f,%.2f],"
-           "\"ral\":%.1f,\"rvs\":%.2f,%s,"
+           "%s,%s,%s,"
            "\"gfix\":%d,\"gsv\":%u,\"ghac\":%.1f,"
            "\"himu\":%d,\"hmag\":%d,\"hbar\":%d,\"hgps\":%d,"
            "\"cmode\":%u,\"cdef\":[%.2f,%.2f,%.2f,%.2f],"
@@ -109,9 +141,8 @@ static void emitState(const lc::StateFields &f, uint8_t seq) {
            (double)(f.gyr_dps[1] * 0.017453293f),
            (double)(f.gyr_dps[2] * 0.017453293f),
            (double)(f.acc_g[0] * 9.80665f), (double)(f.acc_g[1] * 9.80665f),
-           (double)(f.acc_g[2] * 9.80665f), (double)f.vel_mps[0],
-           (double)f.vel_mps[1], (double)f.vel_mps[2], (double)f.ral_m,
-           (double)(-f.vel_mps[2]), geo, f.fix ? 3 : 0, f.sats,
+           (double)(f.acc_g[2] * 9.80665f), vs, vch, geo, f.fix ? 3 : 0,
+           f.sats,
            (double)f.hacc_m, hi, hm, hb, hg, f.cmode, (double)f.cdef_deg[0],
            (double)f.cdef_deg[1], (double)f.cdef_deg[2],
            (double)f.cdef_deg[3], (int)radio.pktRssiDbm(),
@@ -141,10 +172,23 @@ static void sendCmd(const char *cmd) {
     return;
   }
   pend_len_ = lc::packText(lc::kTypeCmd, cmd, up_seq_++, pend_);
+  pend_left_ = 2;
+  pend_send_at_ms_ = millis() + UPLINK_BLIND_MS;
+}
+
+// Called every loop pass; downlink_heard = a frame was just read out of the
+// radio, i.e. the rocket has just finished transmitting.
+static void serviceUplink(bool downlink_heard) {
+  if (pend_left_ == 0) return;
+  uint32_t ms = millis();
+  if (downlink_heard) {  // pull the send time in to the cue (never push out)
+    uint32_t cue = ms + UPLINK_CUE_MS;
+    if ((int32_t)(cue - pend_send_at_ms_) < 0) pend_send_at_ms_ = cue;
+  }
+  if ((int32_t)(ms - pend_send_at_ms_) < 0 || radio.txBusy()) return;
   if (radio.txStart(pend_, (uint8_t)pend_len_)) {
-    pend_at_ms_ = millis() + 150;  // one repeat, then forget
-  } else {
-    pend_at_ms_ = millis() + 30;   // radio busy: retry shortly
+    pend_left_--;
+    pend_send_at_ms_ = ms + UPLINK_BLIND_MS;  // the repeat waits the same way
   }
 }
 
@@ -183,9 +227,11 @@ void setup() {
 void loop() {
   uint8_t ev = radio.poll();
   if (ev & Sx1278::EV_CRCERR) crc_errs_++;
+  bool heard = false;
   if (ev & Sx1278::EV_RXDONE) {
     uint8_t buf[lc::kMaxFrame];
     int n = radio.rxRead(buf, sizeof(buf));
+    heard = n > 0;
     if (n > 0) {
       lc::StateFields f;
       uint8_t seq = 0, type = 0;
@@ -201,11 +247,7 @@ void loop() {
     }
   }
 
-  // one deferred uplink repeat
-  if (pend_len_ > 0 && millis() >= pend_at_ms_ && !radio.txBusy()) {
-    radio.txStart(pend_, (uint8_t)pend_len_);
-    pend_len_ = 0;
-  }
+  serviceUplink(heard);  // listen-after-talk: cue off the frame just heard
 
   // console input -> commands
   while (Serial.available() > 0) {
