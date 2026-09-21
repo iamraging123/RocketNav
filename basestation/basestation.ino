@@ -194,6 +194,20 @@ static void serviceUplink(bool downlink_heard) {
 
 static void handleLine(char *s) {
   if (s[0] != '$') return;
+  if (strcmp(s, "$base regs") == 0) {
+    // Raw radio state, no transmission: dio0 is the GPIO1 pin level, irq
+    // the SX1278 flag register (0x40 = RxDone pending). irq showing RxDone
+    // while dio0 stays 0 = the DIO0 wire, not the radio.
+    char b[120];
+    snprintf(b, sizeof(b),
+             "base: dio0 %d opmode 0x%02X irq 0x%02X modem 0x%02X "
+             "rssi %d dBm frf %02X%02X%02X",
+             (int)radio.dio0High(), radio.reg(0x01), radio.reg(0x12),
+             radio.reg(0x18), (int)radio.reg(0x1B) - 164, radio.reg(0x06),
+             radio.reg(0x07), radio.reg(0x08));
+    emitMsg(b);
+    return;
+  }
   if (strcmp(s, "$base?") == 0) {
     char b[112];
     snprintf(b, sizeof(b),

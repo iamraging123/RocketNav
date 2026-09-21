@@ -156,10 +156,21 @@ bool Sx1278::txStart(const uint8_t *buf, uint8_t len) {
   return true;
 }
 
+// Flag-register read cadence when DIO0 says nothing is pending. A loose or
+// floating DIO0 (base station bench, 2026-09-20: TX worked, RX counted
+// nothing for minutes) would otherwise silence the receive path completely;
+// with this, it costs at most kFlagPollMs of latency. One 2-byte SPI read
+// per period is nothing on either end.
+static const uint32_t kFlagPollMs = 20;
+
 uint8_t Sx1278::poll() {
   if (!present_) return 0;
-  // Zero-SPI fast path: nothing pending unless DIO0 is up or TX in flight.
-  if (!tx_busy_ && dio0_ >= 0 && digitalRead(dio0_) == LOW) return 0;
+  // Zero-SPI fast path: nothing pending unless DIO0 is up, a TX is in
+  // flight, or the timed fallback read is due.
+  uint32_t now = millis();
+  if (!tx_busy_ && dio0_ >= 0 && digitalRead(dio0_) == LOW &&
+      (uint32_t)(now - last_flags_ms_) < kFlagPollMs) return 0;
+  last_flags_ms_ = now;
   uint8_t f = rd(R_IRQ_FLAGS);
   uint8_t ev = 0;
   if (tx_busy_ && (f & IRQ_TXDONE)) {

@@ -220,7 +220,11 @@ transmits 30 ms after hearing a frame (the rocket needs its next radio poll
 to re-arm RX), so uplinks never collide with the rocket's own TX; with no
 downlink heard for 400 ms (rocket muted) the uplink goes out blind. Uplink
 `C` frames carry a `$command` line (sent twice, deduplicated by sequence on
-the rocket) into the same command handler as USB.
+the rocket) into the same command handler as USB. Both radios read the
+SX1278 flag register on a 20 ms timer as well as on DIO0, so a loose DIO0
+wire degrades to latency instead of a silent receiver. `$base regs` (base
+only, no transmission) reports the DIO0 pin level, RegOpMode, RegIrqFlags,
+RegModemStat, live RSSI and the frequency registers.
 
 The base station emits **the same NDJSON records** on its USB serial that
 the rocket emits on its own - a slim `st` subset (attitude, rates, specific

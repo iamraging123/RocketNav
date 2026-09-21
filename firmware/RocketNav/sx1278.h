@@ -32,8 +32,14 @@ class Sx1278 {
   static const uint8_t EV_TXDONE = 1;   // TX finished (radio back in RX)
   static const uint8_t EV_RXDONE = 2;   // frame waiting - call rxRead()
   static const uint8_t EV_CRCERR = 4;   // frame arrived but failed CRC
-  // Cheap: reads SPI only when DIO0 is high or a TX is in flight.
+  // Cheap: reads SPI only when DIO0 is high or a TX is in flight - plus a
+  // timed fallback read (kFlagPollMs) so a loose DIO0 wire costs latency,
+  // never the whole receive path.
   uint8_t poll();
+
+  // Diagnostics: raw register read (does not clear IRQ flags) and DIO0 level.
+  uint8_t reg(uint8_t r) { return present_ ? rd(r) : 0; }
+  bool dio0High() const { return dio0_ >= 0 && digitalRead(dio0_) == HIGH; }
 
   // After EV_RXDONE: copies the packet, returns its length (0 on failure).
   int rxRead(uint8_t *buf, int cap);
@@ -55,6 +61,7 @@ class Sx1278 {
   int8_t cs_ = -1, rst_ = -1, dio0_ = -1;
   bool present_ = false;
   bool tx_busy_ = false;
+  uint32_t last_flags_ms_ = 0;
   int16_t rssi_dbm_ = 0;
   float snr_db_ = 0;
 };

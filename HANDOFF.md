@@ -313,7 +313,12 @@ only learns of its own TxDone at its next 250 Hz radio poll and re-arms RX
 then, so an uplink started the instant its frame ends is lost (bench: 6
 pings → 1 delivery). No downlink cue within 400 ms (`UPLINK_BLIND_MS`,
 rocket muted) → the frame goes blind, so `$lora 1` reaches a silent rocket.
-Never move the cue earlier without re-running the 6-ping test. The base
+Never move the cue earlier without re-running the 6-ping test. **DIO0 is
+advisory:** `Sx1278::poll()` also reads RegIrqFlags every 20 ms
+(`kFlagPollMs`), because on 2026-09-20 the base station went completely
+deaf (TX fine, rx 0 for minutes) with the symptoms of a loose DIO0 wire on
+GPIO1; `$base regs` shows the pin level next to the raw flag register to
+prove it either way. The base
 station translates everything to the same NDJSON the viewer speaks and stamps
 `hdr.mode:"lora"`. Viewer topbar has a USB|LoRa selector; LoRa display is
 4 Hz by design — judge responsiveness over USB.
@@ -406,8 +411,8 @@ refused unless IDLE or SAFE.
 
 | Check | Result |
 |---|---|
-| firmware | 145,612 B flash, 20,072 B RAM |
-| base station (esp32c3, CDCOnBoot=cdc) | 305,468 B flash, 14,640 B RAM |
+| firmware | 145,636 B flash, 20,080 B RAM |
+| base station (esp32c3, CDCOnBoot=cdc) | 305,800 B flash, 14,648 B RAM |
 | eskf_test | 91/91 |
 | magfit_test | 10/10 |
 | link_test | 20/20 |
