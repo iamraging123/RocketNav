@@ -22,6 +22,13 @@ class Sx1278 {
                  uint8_t cr_denom, uint8_t sync, uint16_t preamble,
                  int8_t tx_dbm);
 
+  // Re-program only the modem (SF / BW / CR / preamble) and return to
+  // RX-continuous: the profile switch of PLAN_LORA_RANGE.md. Frequency,
+  // PA and FIFO setup from configure() are untouched. Any TX in flight is
+  // abandoned. LowDataRateOptimize follows the symbol time automatically.
+  void setModem(uint8_t sf, uint32_t bw_hz, uint8_t cr_denom,
+                uint16_t preamble);
+
   void startRx();  // RX-continuous, DIO0 = RxDone
 
   // Loads the FIFO and starts transmitting. false when a TX is already in
@@ -40,6 +47,11 @@ class Sx1278 {
   // Diagnostics: raw register read (does not clear IRQ flags) and DIO0 level.
   uint8_t reg(uint8_t r) { return present_ ? rd(r) : 0; }
   bool dio0High() const { return dio0_ >= 0 && digitalRead(dio0_) == HIGH; }
+  // How receptions were discovered: by the DIO0 pin, or only by the timed
+  // fallback read. A wired, working DIO0 scores nearly every frame; a dead
+  // wire scores zero while the timer carries the link.
+  uint32_t rxViaDio0() const { return n_rx_dio0_; }
+  uint32_t rxViaTimer() const { return n_rx_timer_; }
 
   // After EV_RXDONE: copies the packet, returns its length (0 on failure).
   int rxRead(uint8_t *buf, int cap);
@@ -56,12 +68,15 @@ class Sx1278 {
   void rdBurst(uint8_t reg, uint8_t *p, int n);
   void wrBurst(uint8_t reg, const uint8_t *p, int n);
   void setMode(uint8_t m);
+  void writeModem(uint8_t sf, uint32_t bw_hz, uint8_t cr_denom,
+                  uint16_t preamble);
 
   SPIClass *spi_ = nullptr;
   int8_t cs_ = -1, rst_ = -1, dio0_ = -1;
   bool present_ = false;
   bool tx_busy_ = false;
   uint32_t last_flags_ms_ = 0;
+  uint32_t n_rx_dio0_ = 0, n_rx_timer_ = 0;
   int16_t rssi_dbm_ = 0;
   float snr_db_ = 0;
 };

@@ -108,17 +108,7 @@ void Sx1278::configure(uint32_t freq_hz, uint8_t sf, uint32_t bw_hz,
   wr(R_FRF_MSB + 1, (uint8_t)(frf >> 8));
   wr(R_FRF_MSB + 2, (uint8_t)(frf >> 0));
 
-  uint8_t bw_code = 7;  // 125k
-  if (bw_hz >= 500000ul) bw_code = 9;
-  else if (bw_hz >= 250000ul) bw_code = 8;
-  uint8_t cr_code = (uint8_t)(cr_denom - 4);  // 4/5 -> 1
-  wr(R_MODEM_CFG1, (uint8_t)((bw_code << 4) | (cr_code << 1)));  // explicit hdr
-  wr(R_MODEM_CFG2, (uint8_t)((sf << 4) | 0x04));  // CRC on
-  // AGC on; LowDataRateOptimize only needed when Tsym > 16 ms (SF11+/125k) -
-  // far from this profile.
-  wr(R_MODEM_CFG3, 0x04);
-  wr(R_PREAMBLE_MSB, (uint8_t)(preamble >> 8));
-  wr(R_PREAMBLE_MSB + 1, (uint8_t)(preamble & 0xFF));
+  writeModem(sf, bw_hz, cr_denom, preamble);
   wr(0x39, sync);  // RegSyncWord
 
   // Ra-02 routes only PA_BOOST. 2..17 dBm; PA_DAC stays in default (no
@@ -133,6 +123,31 @@ void Sx1278::configure(uint32_t freq_hz, uint8_t sf, uint32_t bw_hz,
   wr(R_FIFO_TX_BASE, 0x00);
   wr(R_FIFO_RX_BASE, 0x00);
   startRx();
+}
+
+void Sx1278::writeModem(uint8_t sf, uint32_t bw_hz, uint8_t cr_denom,
+                        uint16_t preamble) {
+  uint8_t bw_code = 7;  // 125k
+  if (bw_hz >= 500000ul) bw_code = 9;
+  else if (bw_hz >= 250000ul) bw_code = 8;
+  uint8_t cr_code = (uint8_t)(cr_denom - 4);  // 4/5 -> 1 ... 4/8 -> 4
+  wr(R_MODEM_CFG1, (uint8_t)((bw_code << 4) | (cr_code << 1)));  // explicit hdr
+  wr(R_MODEM_CFG2, (uint8_t)((sf << 4) | 0x04));  // CRC on
+  // AGC on (bit 2). LowDataRateOptimize (bit 3) is mandatory once the
+  // symbol time passes 16 ms (SF11/SF12 at 125 kHz, SF12 at 250 kHz): the
+  // modem cannot track crystal drift over such long symbols without it.
+  uint32_t tsym_us = (uint32_t)((1000000ull << sf) / bw_hz);
+  wr(R_MODEM_CFG3, (uint8_t)(0x04 | (tsym_us > 16000ul ? 0x08 : 0)));
+  wr(R_PREAMBLE_MSB, (uint8_t)(preamble >> 8));
+  wr(R_PREAMBLE_MSB + 1, (uint8_t)(preamble & 0xFF));
+}
+
+void Sx1278::setModem(uint8_t sf, uint32_t bw_hz, uint8_t cr_denom,
+                      uint16_t preamble) {
+  if (!present_) return;
+  setMode(M_STDBY);  // modem registers are written in standby; aborts a TX
+  writeModem(sf, bw_hz, cr_denom, preamble);
+  startRx();         // clears flags, tx_busy_, re-arms RX-continuous
 }
 
 void Sx1278::startRx() {
@@ -168,11 +183,13 @@ uint8_t Sx1278::poll() {
   // Zero-SPI fast path: nothing pending unless DIO0 is up, a TX is in
   // flight, or the timed fallback read is due.
   uint32_t now = millis();
-  if (!tx_busy_ && dio0_ >= 0 && digitalRead(dio0_) == LOW &&
+  bool dio_hi = dio0_ >= 0 && digitalRead(dio0_) == HIGH;
+  if (!tx_busy_ && dio0_ >= 0 && !dio_hi &&
       (uint32_t)(now - last_flags_ms_) < kFlagPollMs) return 0;
   last_flags_ms_ = now;
   uint8_t f = rd(R_IRQ_FLAGS);
   uint8_t ev = 0;
+  if (f & IRQ_RXDONE) { if (dio_hi) n_rx_dio0_++; else n_rx_timer_++; }
   if (tx_busy_ && (f & IRQ_TXDONE)) {
     wr(R_IRQ_FLAGS, IRQ_TXDONE);
     startRx();  // hand the channel straight back to the uplink

@@ -353,6 +353,10 @@ static eskf::Config eskf_cfg_;   // built once in setup, reused by $cal
 static Sx1278 lora;
 static Servos servos;
 static ctl::Control control;
+// LoRa profile hooks (PLAN_LORA_RANGE.md): stillness timer for the landed
+// test and the last profile reported, so every switch becomes a msg.
+static uint64_t still_since_us_ = 0;
+static uint8_t link_prof_seen_ = 0;
 static uint64_t arm_pend_us_ = 0;  // $arm two-step confirmation window
 static int lcal_fin_ = -1;         // linkage-cal session fin, -1 = idle
 static LinkageCal lcal_stage_;     // points collected this session
@@ -1271,6 +1275,14 @@ static void execCommand(char *line) {
   if (strcmp(cmd, "lora?") == 0 || strcmp(cmd, "lora") == 0) {
     char *a = strtok_r(nullptr, " ", &save);
     if (strcmp(cmd, "lora") == 0 && a != nullptr) {
+      if (strcmp(a, "rec") == 0 || strcmp(a, "flight") == 0) {
+        bool rec = a[0] == 'r';
+        link::setProfile(rec ? lc::kProfRecovery : lc::kProfFlight, now);
+        link_prof_seen_ = link::profile();
+        telem::emitMsg(now, rec ? "lora: RECOVERY profile SF11/125k beacon 10 s"
+                                : "lora: FLIGHT profile SF7/500k 4 Hz");
+        return;
+      }
       link::setMute(a[0] == '0');
       telem::emitMsg(now, a[0] == '0' ? "lora: muted" : "lora: transmitting");
       return;
@@ -1280,17 +1292,17 @@ static void execCommand(char *line) {
       return;
     }
     // Compact so the reply survives the 48-byte LoRa msg frame when asked
-    // over RF: "lora: t99999 r9999 c999 rssi -120 snr -20.0 MUTED" = 48.
-    // rssi/snr are of the last UPLINK frame; n/a until one has arrived.
+    // over RF: "lora: R t99999 r9999 c999 rssi -120 snr -20 MUTED" = 48.
+    // F/R = flight/recovery profile. rssi/snr are of the last UPLINK
+    // frame (n/a until one has arrived); snr rounded to 1 dB to fit.
     char rs[8] = "n/a", ss[8] = "n/a";
     if (link::rssiValid()) {
       snprintf(rs, sizeof(rs), "%d", (int)link::lastRssiDbm());
-      long s10 = lroundf(link::lastSnrDb() * 10.0f);
-      snprintf(ss, sizeof(ss), "%s%ld.%ld", s10 < 0 ? "-" : "",
-               labs(s10) / 10, labs(s10) % 10);
+      snprintf(ss, sizeof(ss), "%ld", lroundf(link::lastSnrDb()));
     }
     char lb[96];
-    snprintf(lb, sizeof(lb), "lora: t%lu r%lu c%lu rssi %s snr %s%s",
+    snprintf(lb, sizeof(lb), "lora: %c t%lu r%lu c%lu rssi %s snr %s%s",
+             link::profile() == lc::kProfRecovery ? 'R' : 'F',
              (unsigned long)link::txCount(), (unsigned long)link::rxCount(),
              (unsigned long)link::crcErrCount(), rs, ss,
              link::muted() ? " MUTED" : "");
@@ -1407,6 +1419,32 @@ static void fillLinkState(lc::StateFields *f) {
   f->health = (uint8_t)((qi.fresh ? 1 : 0) | (qm.fresh ? 2 : 0) |
                         (qb.fresh ? 4 : 0) | (qg.fresh ? 8 : 0));
   for (int i = 0; i < 4; ++i) f->cdef_deg[i] = control.deflDeg()[i];
+  f->up_rssi_dbm = link::rssiValid() ? link::lastRssiDbm() : 0;
+}
+
+// 10 Hz: the LoRa MAC's profile hooks. "Landed" = control SAFE with the
+// IMU still (|gyro| < 3 dps, | |a| - g | < 1 m/s^2) for 30 s; "flight lock"
+// = ACTIVE, the one phase in which the link must never re-tune. Every
+// profile change (command or self-directed) is reported as a msg.
+static void linkService(uint64_t now) {
+  const float *g = sensors.lastGyro();
+  const float *a = sensors.lastAccel();
+  float gm = sqrtf(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]) * nav::RAD2DEG;
+  float am = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+  bool still = gm < 3.0f && fabsf(am - 9.80665f) < 1.0f;
+  if (!still) still_since_us_ = 0;
+  else if (still_since_us_ == 0) still_since_us_ = now;
+  bool landed = control.mode() == ctl::CM_SAFE && still_since_us_ != 0 &&
+                (now - still_since_us_) >= 30000000ull;
+  link::noteLanded(landed);
+  link::setFlightLock(control.mode() == ctl::CM_ACTIVE);
+  uint8_t p = link::profile();
+  if (p != link_prof_seen_) {
+    link_prof_seen_ = p;
+    telem::emitMsg(now, p == lc::kProfRecovery
+                            ? "lora: -> RECOVERY profile SF11/125k beacon 10 s"
+                            : "lora: -> FLIGHT profile SF7/500k 4 Hz");
+  }
 }
 
 void setup() {
@@ -1897,6 +1935,7 @@ void loop() {
       next_service_ = now + SERVICE_PERIOD_US;
       sensors.service(now);
       orchestrate(now);
+      linkService(now);
       ledsService();
       // PCA9685 recovery: a failed boot probe (slow power-up, bus glitch)
       // or a $sframe sequence that died mid-flight marks the chip absent;

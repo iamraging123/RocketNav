@@ -49,8 +49,9 @@ int packState(const StateFields &f, uint8_t seq, uint8_t out[kMaxFrame]) {
   out[2] = seq;
   uint8_t *p = out + 3;
   put32(p, (int32_t)f.ms); p += 4;
+  // cmode gets 3 bits: CM_BENCH (4) is a live wire value (control.h).
   *p++ = (uint8_t)((f.fst & 0x07) | (f.fix ? 0x08 : 0) |
-                   ((f.cmode & 0x03) << 4));
+                   ((f.cmode & 0x07) << 4));
   for (int i = 0; i < 3; ++i) { put16(p, sat16(f.eul_deg[i] * 100.0f)); p += 2; }
   for (int i = 0; i < 3; ++i) { put16(p, sat16(f.gyr_dps[i] * 10.0f)); p += 2; }
   for (int i = 0; i < 3; ++i) { put16(p, sat16(f.acc_g[i] * 100.0f)); p += 2; }
@@ -68,6 +69,10 @@ int packState(const StateFields &f, uint8_t seq, uint8_t out[kMaxFrame]) {
   }
   *p++ = f.health;
   for (int i = 0; i < 4; ++i) *p++ = (uint8_t)sat8(f.cdef_deg[i] * 4.0f);
+  {
+    int16_t u = f.up_rssi_dbm;
+    *p++ = (uint8_t)((u < 0) ? ((u < -255) ? 255 : -u) : 0);
+  }
   int n = (int)(p - out);
   uint16_t c = crc16(out, n);
   out[n] = (uint8_t)(c >> 8);
@@ -75,8 +80,79 @@ int packState(const StateFields &f, uint8_t seq, uint8_t out[kMaxFrame]) {
   return n + 2;
 }
 
+static void sealFrame(uint8_t *out, int n) {
+  uint16_t c = crc16(out, n);
+  out[n] = (uint8_t)(c >> 8);
+  out[n + 1] = (uint8_t)(c & 0xFF);
+}
+
+static bool crcOk(const uint8_t *buf, int len) {
+  uint16_t c = crc16(buf, len - 2);
+  return buf[len - 2] == (uint8_t)(c >> 8) && buf[len - 1] == (uint8_t)(c & 0xFF);
+}
+
+int packBeacon(const BeaconFields &b, uint8_t seq, uint8_t out[kMaxFrame]) {
+  out[0] = kMagic;
+  out[1] = kTypeBeacon;
+  out[2] = seq;
+  uint8_t *p = out + 3;
+  put32(p, (int32_t)b.ms); p += 4;
+  *p++ = (uint8_t)((b.fst & 0x07) | (b.fix ? 0x08 : 0) |
+                   ((b.cmode & 0x07) << 4));
+  put32(p, (int32_t)(b.lat_deg * 1e7)); p += 4;
+  put32(p, (int32_t)(b.lon_deg * 1e7)); p += 4;
+  put16(p, sat16(b.alt_msl_m)); p += 2;
+  put16(p, sat16(b.ral_m * 2.0f)); p += 2;
+  for (int i = 0; i < 3; ++i) *p++ = (uint8_t)sat8(b.eul_deg[i] * 0.5f);
+  *p++ = b.sats;
+  *p++ = b.health;
+  int n = (int)(p - out);
+  sealFrame(out, n);
+  return n + 2;
+}
+
+bool parseBeacon(const uint8_t *buf, int len, BeaconFields *b, uint8_t *seq) {
+  if (len != kBeaconFrameLen) return false;
+  if (buf[0] != kMagic || buf[1] != kTypeBeacon) return false;
+  if (!crcOk(buf, len)) return false;
+  *seq = buf[2];
+  const uint8_t *p = buf + 3;
+  b->ms = (uint32_t)get32(p); p += 4;
+  b->fst = *p & 0x07;
+  b->fix = (*p & 0x08) != 0;
+  b->cmode = (*p >> 4) & 0x07;
+  p++;
+  b->lat_deg = get32(p) * 1e-7; p += 4;
+  b->lon_deg = get32(p) * 1e-7; p += 4;
+  b->alt_msl_m = (float)get16(p); p += 2;
+  b->ral_m = get16(p) * 0.5f; p += 2;
+  for (int i = 0; i < 3; ++i) b->eul_deg[i] = (int8_t)(*p++) * 2.0f;
+  b->sats = *p++;
+  b->health = *p++;
+  return true;
+}
+
+int packKeepalive(uint8_t seq, uint8_t out[kMaxFrame]) {
+  out[0] = kMagic;
+  out[1] = kTypeKeepalive;
+  out[2] = seq;
+  sealFrame(out, 3);
+  return kKeepaliveFrameLen;
+}
+
+bool parseKeepalive(const uint8_t *buf, int len, uint8_t *seq) {
+  if (len != kKeepaliveFrameLen) return false;
+  if (buf[0] != kMagic || buf[1] != kTypeKeepalive) return false;
+  if (!crcOk(buf, len)) return false;
+  *seq = buf[2];
+  return true;
+}
+
 bool parseState(const uint8_t *buf, int len, StateFields *f, uint8_t *seq) {
-  if (len != kStateFrameLen) return false;
+  // 53 bytes = the pre-2026-09-21 frame without the uplink-rssi byte: still
+  // accepted so a base station can be flashed ahead of the rocket.
+  const bool legacy = (len == kStateFrameLen - 1);
+  if (len != kStateFrameLen && !legacy) return false;
   if (buf[0] != kMagic || buf[1] != kTypeState) return false;
   uint16_t c = crc16(buf, len - 2);
   if (buf[len - 2] != (uint8_t)(c >> 8) || buf[len - 1] != (uint8_t)(c & 0xFF))
@@ -86,7 +162,7 @@ bool parseState(const uint8_t *buf, int len, StateFields *f, uint8_t *seq) {
   f->ms = (uint32_t)get32(p); p += 4;
   f->fst = *p & 0x07;
   f->fix = (*p & 0x08) != 0;
-  f->cmode = (*p >> 4) & 0x03;
+  f->cmode = (*p >> 4) & 0x07;
   p++;
   for (int i = 0; i < 3; ++i) { f->eul_deg[i] = get16(p) * 0.01f; p += 2; }
   for (int i = 0; i < 3; ++i) { f->gyr_dps[i] = get16(p) * 0.1f; p += 2; }
@@ -100,6 +176,12 @@ bool parseState(const uint8_t *buf, int len, StateFields *f, uint8_t *seq) {
   f->hacc_m = (*p++) * 0.1f;
   f->health = *p++;
   for (int i = 0; i < 4; ++i) f->cdef_deg[i] = (int8_t)(*p++) * 0.25f;
+  if (legacy) {
+    f->up_rssi_dbm = 0;
+  } else {
+    int v = *p++;
+    f->up_rssi_dbm = v ? (int16_t)(-v) : 0;
+  }
   return true;
 }
 

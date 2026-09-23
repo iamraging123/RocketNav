@@ -201,7 +201,7 @@ overlong lines are dropped and the parser resyncs at the next newline.
 | `$ctl <kp_rate> <ki_rate> <kp_ang>` | live controller gains (RAM; echoed as `ctl:` msg ×1000) |
 | `$sframe <hz>` | live servo PWM frame rate, 24–333 Hz (IDLE only, RAM; boot default 100 — inside the MG90S-class analog envelope; `$sframe 50` falls back to the spec point). The frame period is the dominant command→pulse latency: 50 Hz ⇒ up to 20 ms, digital servos at 200–333 Hz cut it ~4×. The write cadence and the write deadband rescale with it. A frame change rescales the counts of **all 16 channels**, so channels 4–15 (anything parked by `$ang`) are released (limp) rather than left outputting wrong pulses; the canards are rewritten at the new frame immediately. Reply msg reports the achieved (prescale-quantized) frame. If the reprogram sequence dies mid-way on a bus fault the chip is reported absent (health flags it, arming refuses) and the 10 Hz recovery probe re-initializes it. Analog servos may buzz or heat at high rates — watch them |
 | `$ctlmode rate\|angle` | rate damping (gyro only) vs roll-angle hold (uses estimated roll; target captured at ACTIVE entry) |
-| `$lora 0\|1` / `$lora?` | mute/unmute the downlink; status msg `lora: t<tx> r<rx> c<crcerr> rssi <dBm> snr <dB>[ MUTED]` (≤ 48 chars so it survives the LoRa msg frame; rssi/snr are of the last uplink frame, `n/a` until one has arrived; `lora: ABSENT …` when the radio was not found at boot). **Boots muted** (`LORA_TX_AT_BOOT 0`, bench default - an antenna-less Ra-02 must never transmit); RX runs regardless, so uplink commands still arrive while muted |
+| `$lora 0\|1` / `$lora rec\|flight` / `$lora?` | mute/unmute the downlink; force the RECOVERY or FLIGHT air profile (see "LoRa link"); status msg `lora: <F\|R> t<tx> r<rx> c<crcerr> rssi <dBm> snr <dB>[ MUTED]` (F/R = current profile; ≤ 48 chars so it survives the LoRa msg frame; rssi/snr are of the last uplink frame, `n/a` until one has arrived, snr rounded to 1 dB; `lora: ABSENT …` when the radio was not found at boot). **Boots muted** (`LORA_TX_AT_BOOT 0`, bench default - an antenna-less Ra-02 must never transmit); RX runs regardless, so uplink commands still arrive while muted |
 | `$sens?` | one-line health msg: present/fresh per sensor, PCA9685, radio, I2C error counters |
 
 `$cal`, `$magcal` and `$magclr` are refused while ARMED, ACTIVE or BENCH (the
@@ -211,20 +211,49 @@ are live is never acceptable) - `$disarm` first. They are allowed in SAFE.
 ## LoRa link
 
 Rocket Ra-02 (SX1278, SPI1: PA5/PA6/PA7, NSS PA4, RESET PC4, DIO0 PB0) ⇄
-base station ESP32-C3 + Ra-02 (`basestation/`). Air profile (both ends,
-`linkcodec.h`): 433.5 MHz, SF7, BW 500 kHz, CR 4/5, sync 0x4B, 17 dBm
-PA_BOOST. The rocket transmits one 53-byte state frame every 250 ms (~27 ms
-airtime, ~11% duty) and message frames on alternate slots when queued; it
-listens (RX-continuous) the rest of the time. The base station only
+base station ESP32-C3 + Ra-02 (`basestation/`). 433.5 MHz, sync 0x4B, 17 dBm
+PA_BOOST, and two air profiles both ends share (`linkcodec.h`,
+PLAN_LORA_RANGE.md):
+
+| Profile | Modem | Downlink | Airtime / duty | Use |
+|---|---|---|---|---|
+| **FLIGHT** | SF7, BW 500 kHz, CR 4/5, preamble 8 | 54-byte `T` state frame every 250 ms | ~27 ms, ~11 % | the display link; short frames dodge spin fades |
+| **RECOVERY** | SF11, BW 125 kHz, CR 4/5, preamble 12 | 27-byte `B` position beacon every 10 s | ~0.9 s, ~9 % | +17 dB of sensitivity for finding a landed rocket |
+
+The rocket transmits its downlink frame on the profile cadence and message
+frames on alternate slots when queued (in RECOVERY a queued message goes out
+at once); it listens (RX-continuous) the rest of the time. **The rocket
+switches to RECOVERY by itself** when control is SAFE and the IMU has been
+still for 30 s (landed), or when the base's `K` keepalives (one every 5 s)
+have stopped for 20 s after being heard - never while control is ACTIVE,
+never while muted. `$lora rec` / `$lora flight` force it either way and
+every switch is reported as `lora: -> RECOVERY …` / `lora: -> FLIGHT …`.
+**The base follows without negotiation:** once it has heard the rocket at
+all, 10 s of silence on FLIGHT makes it listen on RECOVERY, 30 s of silence
+there starts a 10 s-per-profile scan; `$base flight` / `$base rec` pin the
+listen profile and `$base auto` frees it. Until the first frame ever it stays
+on FLIGHT, and a command's repeat goes out on the other profile whenever the
+rocket has not been heard on the current one - so a muted bench rocket's
+Unmute gets through while the base is scanning. The base `hdr` carries
+`prof` (`"flight"` / `"recovery"`) and `ohz` (4 / 0.1) and repeats every
+10 s and on every switch. Beacon-derived `st` records carry `"beacon":1`,
+euler to 2°, `ral` to 0.5 m and no rates/accel/velocity; flight `st` records
+carry `urssi` (RSSI of the base's uplink as heard by the rocket, null until
+one has arrived). The base station only
 transmits 30 ms after hearing a frame (the rocket needs its next radio poll
 to re-arm RX), so uplinks never collide with the rocket's own TX; with no
-downlink heard for 400 ms (rocket muted) the uplink goes out blind. Uplink
+downlink heard for 400 ms on FLIGHT / 2.5 s on RECOVERY (rocket muted, or
+the slow profile's 0.6 s command frame and the rocket's immediate reply
+still on the air) the uplink goes out blind. Uplink
 `C` frames carry a `$command` line (sent twice, deduplicated by sequence on
 the rocket) into the same command handler as USB. Both radios read the
 SX1278 flag register on a 20 ms timer as well as on DIO0, so a loose DIO0
 wire degrades to latency instead of a silent receiver. `$base regs` (base
 only, no transmission) reports the DIO0 pin level, RegOpMode, RegIrqFlags,
-RegModemStat, live RSSI and the frequency registers.
+RegModemStat, live RSSI and the frequency registers. `$base?` ends with
+`dio0 N timer M`: how many receptions were flagged by the DIO0 pin versus
+found only by the timed read - a working DIO0 wire scores nearly all of
+them, a dead one scores none while the timer carries the link.
 
 The base station emits **the same NDJSON records** on its USB serial that
 the rocket emits on its own - a slim `st` subset (attitude, rates, specific

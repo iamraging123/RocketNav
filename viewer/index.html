@@ -83,9 +83,22 @@
   .lmode button.on { background: var(--text); color: var(--bg); }
   .lmode .lbl { padding: 3px 5px 3px 8px; color: var(--dim2); font-size: 10px;
     letter-spacing: .09em; text-transform: uppercase; align-self: center; }
+  /* USB-only elements: the 4 Hz LoRa stream is a subset of the USB record
+     (no sigmas, biases, mag, baro, innovations, raw GNSS, loop stats, cal,
+     origin or linkage records), so their placeholders hide in LoRa mode. */
+  body.lora .uo { display: none !important; }
+  /* Flight-only elements: the recovery beacon carries no rates, accel or
+     velocity, so those hide while the stream is the recovery profile. */
+  body.recovery .fo { display: none !important; }
+  #histSlider { flex: 0 0 150px; min-width: 150px; }
   #loraBar { display: none; }
   #loraBar.on { display: flex; }
   .badge.bad, .badge.bad b { color: var(--bad); border-color: var(--bad); }
+  .badge.good b { color: var(--c2); }
+  .badge.warn, .badge.warn b { color: var(--c4); border-color: var(--c4); }
+  td.r.good { color: var(--c2); }
+  td.r.warn { color: var(--c4); }
+  td.r.bad { color: var(--bad); }
   .badge.sim { border-color: var(--bad); color: var(--bad); }
   input[type=range] { flex: 1; min-width: 120px; accent-color: var(--dim); }
   input[type=range]:disabled { opacity: 0.35; }
@@ -266,11 +279,11 @@
   <button id="btnDemo" class="secondary">Demo</button>
   <span class="badge" id="bFw"><b>&mdash;</b> fw</span>
   <span class="badge" id="bState">state <b>&mdash;</b></span>
-  <span class="badge" id="bMag">mode <b>&mdash;</b></span>
+  <span class="badge uo" id="bMag">mode <b>&mdash;</b></span>
   <span class="badge" id="bCtl">ctl <b>&mdash;</b></span>
   <span class="badge" id="bLnk">link <b>&mdash;</b></span>
-  <span class="badge" id="bFhz">filter <b>&mdash;</b> Hz</span>
-  <span class="badge" id="bGrz">gnss <b>&mdash;</b> Hz</span>
+  <span class="badge uo" id="bFhz">filter <b>&mdash;</b> Hz</span>
+  <span class="badge uo" id="bGrz">gnss <b>&mdash;</b> Hz</span>
   <span class="badge" id="bRx">rx <b>&mdash;</b> Hz</span>
   <span class="badge" id="bAge">age <b>&mdash;</b></span>
   <span class="badge" id="bRec">recs <b>0</b></span>
@@ -287,14 +300,19 @@
 
 <div class="bar" id="loraBar">
   <span class="badge" id="lbDown" title="LIVE = state frames within 2 s. QUIET / MUTED? = the base station hears nothing: the rocket boots with the downlink muted, so Unmute is the usual answer.">downlink <b>&mdash;</b></span>
+  <span class="badge" id="lbProf" title="Air profile the base station is listening on. FLIGHT = SF7 / 500 kHz state frames at 4 Hz. RECOVERY = SF11 / 125 kHz position beacon every 10 s, +17 dB of sensitivity for finding a landed rocket. The rocket switches itself after landing (SAFE and still 30 s) or when the base's keepalives stop for 20 s; the base follows by listening. Recovery / Flight force the rocket; $base flight|rec|auto pins the base.">profile <b>&mdash;</b></span>
   <button id="lbUnmute" class="secondary mini" title="$lora 1 &mdash; start the rocket's 4 Hz downlink (boots muted). Antenna on the rocket first.">Unmute</button>
   <button id="lbMute" class="secondary mini" title="$lora 0 &mdash; stop the downlink">Mute</button>
   <button id="lbPing" class="secondary mini" title="$ping &mdash; round trip base &rarr; rocket &rarr; base, timed to the pong">Ping</button>
   <button id="lbLoraQ" class="secondary mini" title="$lora? &mdash; rocket-side link counters, answered over RF">Rocket link</button>
   <button id="lbBaseQ" class="secondary mini" title="$base? &mdash; base-station counters (answered locally, no transmission)">Base</button>
-  <span class="badge" id="lbRssi" title="RSSI of the last frame at the base station">rssi <b>&mdash;</b> dBm</span>
-  <span class="badge" id="lbSnr">snr <b>&mdash;</b> dB</span>
-  <span class="badge" id="lbLoss" title="Frames the base station missed, from air sequence gaps">air loss <b>&mdash;</b></span>
+  <button id="lbRec" class="secondary mini" title="$lora rec &mdash; rocket to the RECOVERY profile now (long-range beacon every 10 s)">Recovery</button>
+  <button id="lbFlight" class="secondary mini" title="$lora flight &mdash; rocket back to the FLIGHT profile (4 Hz)">Flight</button>
+  <span class="badge" id="lbRssi" title="RSSI of the last frame at the base station. SF7 / 500 kHz floor is about &minus;117 dBm: green above &minus;97, amber to &minus;107, red below (drops begin).">rssi <b>&mdash;</b> dBm</span>
+  <span class="badge" id="lbMargin" title="dB above the receiver floor (&minus;117 dBm). Green &ge; 20, amber 10&ndash;20, red &lt; 10.">margin <b>&mdash;</b> dB</span>
+  <span class="badge" id="lbSnr" title="Packet SNR. Saturates near +6 dB on a strong signal, so only negative values count: amber below 0, red below &minus;5 (limit &minus;7.5).">snr <b>&mdash;</b> dB</span>
+  <span class="badge" id="lbLoss" title="Frames the base station missed, from air sequence gaps. Amber from 1 %, red from 5 %.">air loss <b>&mdash;</b></span>
+  <span class="badge" id="lbUp" title="RSSI of the base station's uplink as heard by the ROCKET - the other direction of the link, carried in the state frame">up rssi <b>&mdash;</b> dBm</span>
   <span class="badge" id="lbRate">frames <b>&mdash;</b> Hz</span>
   <span class="badge" id="lbRtt" title="$ping round trip, last measured">ping <b>&mdash;</b></span>
 </div>
@@ -304,6 +322,9 @@
   <input type="range" id="scrub" min="0" max="0" value="0" disabled>
   <span class="badge" id="bBoot">boot <b>&mdash;</b></span>
   <span class="badge" id="scrubLbl">live</span>
+  <span class="spacer"></span>
+  <span class="badge" id="histLbl" title="Chart history window. Auto = 10 s, or 10 min on the 0.1 Hz recovery beacon. Drag the slider to set it (5 s to 1 h, remembered); click this badge to go back to auto. Charts keep the last 16 384 points: ~5 min at 50 Hz USB, ~68 min at 4 Hz LoRa.">history <b>&mdash;</b></span>
+  <input type="range" id="histSlider" min="0" max="100" value="15" title="chart history window">
 </div>
 
 <div id="split">
@@ -327,7 +348,7 @@
       </div>
       <table>
         <tr><td class="k">q [w x y z]</td><td id="aQ" class="r">&mdash;</td></tr>
-        <tr><td class="k">1&sigma; att &deg; [N E D]</td><td id="aSa" class="r">&mdash;</td></tr>
+        <tr class="uo"><td class="k">1&sigma; att &deg; [N E D]</td><td id="aSa" class="r">&mdash;</td></tr>
       </table>
     </div>
     <div class="panel">
@@ -363,24 +384,24 @@
         <div class="ro"><div class="l">Longitude</div><div class="v" id="roLon">&mdash;</div><div class="s" id="roLonS"></div></div>
         <div class="ro"><div class="l">Altitude AGL</div><div class="v" id="roAgl">&mdash;</div><div class="s" id="roAglS"></div></div>
         <div class="ro"><div class="l">Altitude MSL</div><div class="v" id="roAlt">&mdash;</div><div class="s" id="roAltS"></div></div>
-        <div class="ro"><div class="l">Vertical rate</div><div class="v" id="roVs">&mdash;</div><div class="s" id="roVsS"></div></div>
-        <div class="ro"><div class="l">Speed</div><div class="v" id="roSpd">&mdash;</div><div class="s" id="roSpdS"></div></div>
+        <div class="ro fo"><div class="l">Vertical rate</div><div class="v" id="roVs">&mdash;</div><div class="s" id="roVsS"></div></div>
+        <div class="ro fo"><div class="l">Speed</div><div class="v" id="roSpd">&mdash;</div><div class="s" id="roSpdS"></div></div>
         <div class="ro"><div class="l">Apogee</div><div class="v" id="roApo">&mdash;</div><div class="s" id="roApoS"></div></div>
         <div class="ro"><div class="l">From pad</div><div class="v" id="roPad">&mdash;</div><div class="s" id="roPadS"></div></div>
         <div class="ro"><div class="l">Heading</div><div class="v" id="roYaw">&mdash;</div><div class="s" id="roYawS"></div></div>
         <div class="ro"><div class="l">Roll / Pitch</div><div class="v" id="roRp">&mdash;</div><div class="s" id="roRpS"></div></div>
-        <div class="ro"><div class="l">Vel NED m/s</div><div class="v small" id="roVned">&mdash;</div><div class="s" id="roVnedS"></div></div>
-        <div class="ro"><div class="l">Baro bias</div><div class="v" id="roBb">&mdash;</div><div class="s"></div></div>
+        <div class="ro fo"><div class="l">Vel NED m/s</div><div class="v small" id="roVned">&mdash;</div><div class="s" id="roVnedS"></div></div>
+        <div class="ro uo"><div class="l">Baro bias</div><div class="v" id="roBb">&mdash;</div><div class="s"></div></div>
       </div>
       <div class="charts">
         <canvas class="chart tall" id="chAlt"></canvas>
         <canvas class="chart" id="chAtt"></canvas>
-        <canvas class="chart" id="chGyr"></canvas>
-        <canvas class="chart" id="chMag"></canvas>
-        <canvas class="chart" id="dialAcc"></canvas>
+        <canvas class="chart fo" id="chGyr"></canvas>
+        <canvas class="chart uo" id="chMag"></canvas>
+        <canvas class="chart fo" id="dialAcc"></canvas>
       </div>
       <div class="tables">
-        <div class="panel">
+        <div class="panel uo">
           <h2>Filter</h2>
           <table>
             <tr><td class="k">&sigma; pos NED m</td><td id="fSp" class="r">&mdash;</td></tr>
@@ -393,7 +414,7 @@
             <tr><td class="k">innov baro m</td><td id="fIbr" class="r">&mdash;</td></tr>
           </table>
         </div>
-        <div class="panel">
+        <div class="panel uo">
           <h2>Calibration</h2>
           <table>
             <tr><td class="k">gyro offset &deg;/s</td><td id="calBg" class="r">&mdash;</td></tr>
@@ -402,7 +423,7 @@
             <tr><td class="k">align quality</td><td id="hAlq" class="r">&mdash;</td></tr>
           </table>
         </div>
-        <div class="panel">
+        <div class="panel uo">
           <h2>Origin</h2>
           <table>
             <tr><td class="k">anchored at</td><td id="dOrg" class="r">&mdash;</td></tr>
@@ -412,14 +433,14 @@
         <div class="panel">
           <h2>Sensors</h2>
           <table>
-            <tr><td class="k">acc m/s&sup2;</td><td id="sAcc" class="r">&mdash;</td></tr>
-            <tr><td class="k">gyro &deg;/s</td><td id="sGyr" class="r">&mdash;</td></tr>
-            <tr><td class="k">mag &micro;T</td><td id="sMag" class="r">&mdash;</td></tr>
-            <tr><td class="k">mag raw &micro;T</td><td id="sMagR" class="r">&mdash;</td></tr>
-            <tr><td class="k">|B| / incl</td><td id="sMagD" class="r">&mdash;</td></tr>
-            <tr><td class="k">baro</td><td id="sBaro" class="r">&mdash;</td></tr>
-            <tr><td class="k">gyro bias &deg;/s</td><td id="sBg" class="r">&mdash;</td></tr>
-            <tr><td class="k">accel bias m/s&sup2;</td><td id="sBa" class="r">&mdash;</td></tr>
+            <tr class="fo"><td class="k">acc m/s&sup2;</td><td id="sAcc" class="r">&mdash;</td></tr>
+            <tr class="fo"><td class="k">gyro &deg;/s</td><td id="sGyr" class="r">&mdash;</td></tr>
+            <tr class="uo"><td class="k">mag &micro;T</td><td id="sMag" class="r">&mdash;</td></tr>
+            <tr class="uo"><td class="k">mag raw &micro;T</td><td id="sMagR" class="r">&mdash;</td></tr>
+            <tr class="uo"><td class="k">|B| / incl</td><td id="sMagD" class="r">&mdash;</td></tr>
+            <tr class="uo"><td class="k">baro</td><td id="sBaro" class="r">&mdash;</td></tr>
+            <tr class="uo"><td class="k">gyro bias &deg;/s</td><td id="sBg" class="r">&mdash;</td></tr>
+            <tr class="uo"><td class="k">accel bias m/s&sup2;</td><td id="sBa" class="r">&mdash;</td></tr>
           </table>
         </div>
         <div class="panel">
@@ -429,8 +450,8 @@
             <tr><td class="k">Mag</td><td id="hMag" class="chips"></td></tr>
             <tr><td class="k">Baro</td><td id="hBar" class="chips"></td></tr>
             <tr><td class="k">GNSS</td><td id="hGps" class="chips"></td></tr>
-            <tr><td class="k">sensor drops</td><td id="hDrops" class="r">&mdash;</td></tr>
-            <tr><td class="k">i2c err / resets</td><td id="hI2c" class="r">&mdash;</td></tr>
+            <tr class="uo"><td class="k">sensor drops</td><td id="hDrops" class="r">&mdash;</td></tr>
+            <tr class="uo"><td class="k">i2c err / resets</td><td id="hI2c" class="r">&mdash;</td></tr>
           </table>
         </div>
         <div class="panel">
@@ -438,18 +459,18 @@
           <table>
             <tr><td class="k">fix / sats</td><td id="gFix" class="r">&mdash;</td></tr>
             <tr><td class="k">hAcc / vAcc / sAcc</td><td id="gAcc" class="r">&mdash;</td></tr>
-            <tr><td class="k">raw lat, lon</td><td id="gPos" class="r">&mdash;</td></tr>
-            <tr><td class="k">raw alt MSL</td><td id="gAlt" class="r">&mdash;</td></tr>
-            <tr><td class="k">fix age</td><td id="gAge" class="r">&mdash;</td></tr>
-            <tr><td class="k">meas rate</td><td id="gRate" class="r">&mdash;</td></tr>
+            <tr class="uo"><td class="k">raw lat, lon</td><td id="gPos" class="r">&mdash;</td></tr>
+            <tr class="uo"><td class="k">raw alt MSL</td><td id="gAlt" class="r">&mdash;</td></tr>
+            <tr class="uo"><td class="k">fix age</td><td id="gAge" class="r">&mdash;</td></tr>
+            <tr class="uo"><td class="k">meas rate</td><td id="gRate" class="r">&mdash;</td></tr>
           </table>
         </div>
         <div class="panel">
           <h2>Device</h2>
           <table>
-            <tr><td class="k">at boot</td><td id="dBoot" class="chips"></td></tr>
-            <tr><td class="k">imu</td><td id="dImu" class="r">&mdash;</td></tr>
-            <tr><td class="k">mag / baro</td><td id="dMagBar" class="r">&mdash;</td></tr>
+            <tr class="uo"><td class="k">at boot</td><td id="dBoot" class="chips"></td></tr>
+            <tr class="uo"><td class="k">imu</td><td id="dImu" class="r">&mdash;</td></tr>
+            <tr class="uo"><td class="k">mag / baro</td><td id="dMagBar" class="r">&mdash;</td></tr>
             <tr><td class="k">gnss / output</td><td id="dGnss" class="r">&mdash;</td></tr>
             <tr><td class="k">fw / schema</td><td id="dFw" class="r">&mdash;</td></tr>
           </table>
@@ -460,7 +481,7 @@
             <tr><td class="k">records / errors</td><td id="hRecs" class="r">0 / 0</td></tr>
             <tr><td class="k">record rate</td><td id="hRx" class="r">&mdash;</td></tr>
             <tr><td class="k">tx drops / seq gaps</td><td id="hDtx" class="r">&mdash;</td></tr>
-            <tr><td class="k">max loop (lmx)</td><td id="hLmx" class="r">&mdash;</td></tr>
+            <tr class="uo"><td class="k">max loop (lmx)</td><td id="hLmx" class="r">&mdash;</td></tr>
           </table>
         </div>
         <div class="panel">
@@ -507,7 +528,7 @@
           <div class="ctlrow"><button id="angCenter" class="secondary mini" title="Command 0&deg; canard = calibrated neutral (fin straight). Calibrate the fin first in Linkage cal.">Neutral 0&deg;</button><button id="angTest" class="secondary mini" title="All four fins: +10&deg; then -10&deg; then 0&deg; (calibrated). Watch each fin move.">Test all fins</button><button id="angRel" class="secondary mini">Release</button><button id="angAllOff" class="secondary mini">All off</button><button id="angScan" class="secondary mini" title="Wiggles every PCA channel in turn (~19 s). Watch which servo moves on which console announcement to learn its real channel.">Scan 16 ch</button></div>
           <div class="ctlrow"><span class="ro" style="color:var(--dim);font-size:11px">true canard degrees via linkage cal &middot; 0&deg; = neutral. Calibrate first or 0&deg; is just the raw servo center.</span></div>
         </div>
-        <div class="panel">
+        <div class="panel uo">
           <h2>Linkage cal</h2>
           <div class="ctlrow"><span class="k2">fin</span><select id="lcFin"><option value="0">S0</option><option value="1">S1</option><option value="2">S2</option><option value="3">S3</option></select><button id="lcStart" class="secondary mini">Start</button><button id="lcAbort" class="secondary mini">End</button></div>
           <div class="ctlrow"><span class="k2">jog &micro;s</span><button id="lcJm50" class="secondary mini">-50</button><button id="lcJm10" class="secondary mini">-10</button><button id="lcJp10" class="secondary mini">+10</button><button id="lcJp50" class="secondary mini">+50</button></div>
@@ -553,7 +574,7 @@
             <tr><td class="k">bytes this session</td><td id="cBytes" class="r">&mdash;</td></tr>
             <tr><td class="k">records / parse err</td><td id="cRecs" class="r">&mdash;</td></tr>
             <tr><td class="k">lost records (seq gaps)</td><td id="cLoss" class="r">&mdash;</td></tr>
-            <tr><td class="k">fw tx drops (dtx)</td><td id="cDtx" class="r">&mdash;</td></tr>
+            <tr class="uo"><td class="k">fw tx drops (dtx)</td><td id="cDtx" class="r">&mdash;</td></tr>
             <tr><td class="k">data age</td><td id="cAge" class="r">&mdash;</td></tr>
             <tr><td class="k">RSSI</td><td id="cRssi" class="r">&mdash;</td></tr>
             <tr><td class="k">SNR</td><td id="cSnr" class="r">&mdash;</td></tr>
@@ -733,7 +754,7 @@ class Chart {
     this.win = opts.win || 10;        // seconds
     this.gates = opts.gates || [];    // horizontal dashed lines
     this.markers = [];                // [{t, y}] reject dots
-    this.cap = 4096;
+    this.cap = 16384;  // ~5 min at 50 Hz, ~68 min at 4 Hz, days at 0.1 Hz
     this.t = new Float64Array(this.cap);
     this.v = series.map(() => new Float32Array(this.cap));
     this.head = 0; this.n = 0;
@@ -1396,6 +1417,21 @@ function fmtDist(m) { return m >= 1000 ? (m / 1000).toFixed(1) + "km" : m.toFixe
 const FST = ["INIT", "ALIGN", "WAIT FIX", "RUN", "ATT ONLY"];
 const FIXNAMES = { 0: "none", 1: "DR", 2: "2D", 3: "3D", 4: "3D+DR", 5: "time" };
 
+// LoRa records carry a subset of the USB fields: print "—", never "undefined".
+const nv = v => (v === null || v === undefined) ? "—" : v;
+
+/* ZYX (yaw-pitch-roll) euler degrees -> [w x y z]; the same construction the
+   demo uses, the inverse of the firmware euler(). LoRa records carry euler
+   but no quaternion, so the 3-D model and compass rebuild q from it. */
+function eulToQuat(e) {
+  const h = Math.PI / 360;
+  const cr = Math.cos(e[0] * h), sr = Math.sin(e[0] * h);
+  const cp = Math.cos(e[1] * h), sp = Math.sin(e[1] * h);
+  const cy = Math.cos(e[2] * h), sy = Math.sin(e[2] * h);
+  return [cy * cp * cr + sy * sp * sr, cy * cp * sr - sy * sp * cr,
+          cy * sp * cr + sy * cp * sr, sy * cp * cr - cy * sp * sr];
+}
+
 function applyToCharts(r) {
   const t = r._t;
   const nn = v => (v === null || v === undefined) ? null : v;
@@ -1487,11 +1523,15 @@ function handleLine(line) {
     return;
   }
   const r = p.rec;
+  if (!r.q && r.eul) r.q = eulToQuat(r.eul);  // LoRa: euler only on the wire
   S.recCount++;
   const wall = performance.now();
   S.lastRxWall = wall;
   S.rxWall.push(wall);
-  while (S.rxWall.length && wall - S.rxWall[0] > 2000) S.rxWall.shift();
+  // Rate window: 2 s, or 3 frame periods when the stream is slower (30 s
+  // on the 0.1 Hz recovery beacon) so the rate reads 0.1 instead of "—".
+  const rateWin = (S.hdr && S.hdr.ohz > 0) ? Math.max(2000, 3000 / S.hdr.ohz) : 2000;
+  while (S.rxWall.length && wall - S.rxWall[0] > rateWin) S.rxWall.shift();
   if (S.lastSeq !== null && r.seq > S.lastSeq + 1) S.seqGaps += r.seq - S.lastSeq - 1;
   S.lastSeq = r.seq;
   if (S.t0_us === null) S.t0_us = r.us;
@@ -1596,11 +1636,12 @@ function updateDevice() {
     HT("dBoot",
       chip("imu", h.imu, h.imu ? "ok" : "bad") + chip("mag", h.mag, h.mag ? "ok" : "bad") +
       chip("baro", h.bar, h.bar ? "ok" : "bad") + chip("gps", h.gps, h.gps ? "ok" : "bad"));
-    T("dImu", `${h.iodr} Hz · ±${h.afs} g · ±${h.gfs} dps`);
-    T("dMagBar", `${h.modr} Hz ${h.mmode} / ${h.bhz} Hz`);
+    const viaBase = h.mode === "lora";  // the bridge's hdr has no sensor config
+    T("dImu", viaBase ? "—" : `${h.iodr} Hz · ±${h.afs} g · ±${h.gfs} dps`);
+    T("dMagBar", viaBase ? "—" : `${h.modr} Hz ${h.mmode} / ${h.bhz} Hz`);
     T("dGnss", h.mode === "lora" ? `via base station · ${h.ohz} Hz out`
                               : `${h.gmode} ${h.ghz} Hz / ${h.ohz} Hz out`);
-    T("dFw", `${h.fw} / sch ${h.sch}`);
+    T("dFw", `${h.fw} / sch ${h.sch !== undefined ? h.sch : (h.schema || "—")}`);
   }
   const o = S.org;
   if (o) {
@@ -1610,12 +1651,50 @@ function updateDevice() {
   }
 }
 
+/* Is the stream the base station's? Its hdr says mode:"lora", but that hdr
+   goes out at boot and the ESP32-C3 reboots when its port is opened, so
+   the viewer can miss (or tear) it. Base-station st records are the only
+   ones carrying `loss`: that is the fallback tell. */
+/* Link-quality bands for the SF7 / 500 kHz profile (both radios, linkcodec.h):
+   receiver floor ≈ −117 dBm, demodulator SNR limit ≈ −7.5 dB. RSSI drives
+   the grade - green while ≥ 20 dB above the floor, red inside 10 dB. The
+   packet SNR estimate saturates near +6 dB on a strong signal, so only a
+   negative SNR counts against the link. Air loss: 1 % amber, 5 % red. */
+const LORA_FLOOR_DBM = -117;
+function gradeRssi(v) {
+  if (v == null) return "";
+  const m = v - LORA_FLOOR_DBM;
+  return m >= 20 ? "good" : m >= 10 ? "warn" : "bad";
+}
+function gradeSnr(v) {
+  if (v == null) return "";
+  return v >= 0 ? "good" : v >= -5 ? "warn" : "bad";
+}
+function gradeLoss(v) {
+  if (v == null) return "";
+  return v < 1 ? "good" : v < 5 ? "warn" : "bad";
+}
+function setGrade(id, g) {
+  const e = $(id);
+  if (!e) return;
+  e.classList.remove("good", "warn", "bad");
+  if (g) e.classList.add(g);
+}
+
+function loraStreamNow() {
+  return !!((S.hdr && S.hdr.mode === "lora") ||
+            (S.last && S.last.loss !== undefined));
+}
+
 function updateDom() {
   const r = S.paused ? S.view : S.last;
 
   const active = S.connected || S.sim;
   const age = (active && S.lastRxWall) ? (performance.now() - S.lastRxWall) / 1000 : null;
-  const stale = age !== null && age > 2 && !S.paused;
+  // The stale threshold follows the stream cadence (hdr.ohz): 2 s on USB or
+  // the flight profile, 30 s on the 0.1 Hz recovery beacon.
+  const staleT = (S.hdr && S.hdr.ohz > 0) ? Math.max(2, 3 / S.hdr.ohz) : 2;
+  const stale = age !== null && age > staleT && !S.paused;
   $("staleBar").style.display = stale ? "" : "none";
   if (stale) $("staleAge").textContent = age.toFixed(0);
   document.body.classList.toggle("stale", stale);
@@ -1630,7 +1709,7 @@ function updateDom() {
   HT("bRx", `rx <b>${fmt(rxHz, 1)}</b> Hz`);
   const bA = $("bAge");
   bA.innerHTML = `age <b>${age === null ? "—" : age.toFixed(age < 10 ? 2 : 0) + " s"}</b>`;
-  bA.className = "badge" + (age !== null && age > 2 ? " bad" : "");
+  bA.className = "badge" + (age !== null && age > staleT ? " bad" : "");
   HT("bRec", `recs <b>${S.recCount}</b>`);
   HT("bErr", `err <b>${S.parseErr}</b>`);
   if (S.hdr) HT("bFw", `<b>${S.hdr.fw}</b> sch${S.hdr.sch !== undefined ? S.hdr.sch : (S.hdr.schema || "?")} · fw`);
@@ -1642,7 +1721,7 @@ function updateDom() {
   T("hRx", rxHz === null ? "—" : `${rxHz.toFixed(1)} Hz`);
 
   // Comms tab link panel
-  const loraStream = !!(S.hdr && S.hdr.mode === "lora");
+  const loraStream = loraStreamNow();
   T("cLink", S.connected ? (loraStream ? "LoRa via base station · 4 Hz"
                                        : "USB serial · 921 600 Bd")
            : S.sim ? "demo" : "—");
@@ -1668,7 +1747,7 @@ function updateDom() {
   T("cLoss", lossP === null ? "—" : `${S.seqGaps} (${lossP.toFixed(2)}%)`);
   T("cAge", age === null ? "—" : age.toFixed(2) + " s");
   const rr0 = S.paused ? S.view : S.last;
-  T("cDtx", rr0 ? String(rr0.dtx) : "—");
+  T("cDtx", rr0 && rr0.dtx != null ? String(rr0.dtx) : "—");
   T("cRssi", rr0 && rr0.rssi !== undefined && rr0.rssi !== null
       ? fmt(rr0.rssi, 0) + " dBm" : "—");
   T("cSnr", rr0 && rr0.snr !== undefined && rr0.snr !== null
@@ -1676,16 +1755,35 @@ function updateDom() {
   T("cAirLoss", rr0 && rr0.loss !== undefined && rr0.loss !== null
       ? fmt(rr0.loss, 1) + " %" : "—");
   T("cRtt", S.pingRtt === null ? "—" : S.pingRtt.toFixed(0) + " ms");
+  setGrade("cRssi", gradeRssi(rr0 && rr0.rssi != null ? rr0.rssi : null));
+  setGrade("cSnr", gradeSnr(rr0 && rr0.snr != null ? rr0.snr : null));
+  setGrade("cAirLoss", gradeLoss(rr0 && rr0.loss != null ? rr0.loss : null));
 
   // LoRa bar: shown whenever LoRa is selected or the stream is the base
   // station's. Downlink LIVE = a frame within 2 s; otherwise QUIET (or
   // MUTED? before the first frame - the rocket boots muted).
   const loraUi = S.linkPref === "lora" || loraStream;
   $("loraBar").classList.toggle("on", loraUi);
+  // Declutter: hide what the air frame never carries. Follows the STREAM
+  // when connected (a USB stream shows everything even with LoRa selected)
+  // and the selector when idle, so the page looks right before connecting.
+  document.body.classList.toggle("lora",
+      (S.connected || S.sim) ? loraStream : S.linkPref === "lora");
+  const recovery = loraStream && !!(S.hdr && S.hdr.prof === "recovery");
+  document.body.classList.toggle("recovery", recovery);
+  // Chart history window: the slider's value, else auto - 10 s, or 10 min
+  // on the recovery beacon so a trend exists at all at one point per 10 s.
+  const wantWin = S.histSec || (recovery ? 600 : 10);
+  if (wantWin !== S.histApplied) {
+    S.histApplied = wantWin;
+    for (const k in charts) charts[k].win = wantWin;
+    HT("histLbl", `history <b>${fmtWin(wantWin)}</b>${S.histSec ? "" : " · auto"}`);
+    if (!S.histSec) $("histSlider").value = winToSlider(wantWin);
+  }
   if (loraUi) {
     let dtxt = "—", dbad = false;
     if (S.connected && loraStream) {
-      if (age !== null && age < 2) dtxt = "LIVE";
+      if (age !== null && age < staleT) dtxt = (rr0 && rr0.beacon) ? "BEACON" : "LIVE";
       else { dtxt = S.lastRxWall ? "QUIET" : "MUTED?"; dbad = true; }
     } else if (S.connected && S.hdr) {
       dtxt = "usb stream"; dbad = true;  // wrong port for this selector
@@ -1694,12 +1792,27 @@ function updateDom() {
     dl.innerHTML = `downlink <b>${dtxt}</b>`;
     dl.classList.toggle("bad", dbad);
     const lr = rr0 && loraStream ? rr0 : null;
-    HT("lbRssi", `rssi <b>${lr && lr.rssi != null ? fmt(lr.rssi, 0) : "—"}</b> dBm`);
-    HT("lbSnr", `snr <b>${lr && lr.snr != null ? fmt(lr.snr, 1) : "—"}</b> dB`);
-    HT("lbLoss", `air loss <b>${lr && lr.loss != null ? fmt(lr.loss, 1) + " %" : "—"}</b>`);
+    const lrssi = lr && lr.rssi != null ? lr.rssi : null;
+    const lsnr = lr && lr.snr != null ? lr.snr : null;
+    const lloss = lr && lr.loss != null ? lr.loss : null;
+    HT("lbRssi", `rssi <b>${fmt(lrssi, 0)}</b> dBm`);
+    HT("lbMargin", `margin <b>${lrssi === null ? "—" : (lrssi - LORA_FLOOR_DBM).toFixed(0)}</b> dB`);
+    HT("lbSnr", `snr <b>${fmt(lsnr, 1)}</b> dB`);
+    HT("lbLoss", `air loss <b>${lloss === null ? "—" : fmt(lloss, 1) + " %"}</b>`);
+    setGrade("lbRssi", gradeRssi(lrssi));
+    setGrade("lbMargin", gradeRssi(lrssi));
+    setGrade("lbSnr", gradeSnr(lsnr));
+    setGrade("lbLoss", gradeLoss(lloss));
+    const prof = S.hdr && S.hdr.prof ? String(S.hdr.prof) : null;
+    HT("lbProf", `profile <b>${prof ? prof.toUpperCase() : "—"}</b>`);
+    $("lbProf").classList.toggle("warn", prof === "recovery");
+    const lup = lr && lr.urssi != null ? lr.urssi : null;
+    HT("lbUp", `up rssi <b>${fmt(lup, 0)}</b> dBm`);
+    setGrade("lbUp", gradeRssi(lup));
     HT("lbRate", `frames <b>${loraStream && rxHz !== null ? rxHz.toFixed(1) : "—"}</b> Hz`);
     HT("lbRtt", `ping <b>${S.pingRtt === null ? "—" : S.pingRtt.toFixed(0) + " ms"}</b>`);
-    for (const id of ["lbUnmute", "lbMute", "lbPing", "lbLoraQ", "lbBaseQ"])
+    for (const id of ["lbUnmute", "lbMute", "lbPing", "lbLoraQ", "lbBaseQ",
+                      "lbRec", "lbFlight"])
       $(id).disabled = !S.connected;
   }
 
@@ -1720,7 +1833,7 @@ function updateDom() {
 
   const lnk = $("bLnk");
   if (S.connected) {
-    const eff = (S.hdr && S.hdr.mode === "lora") ? "lora" : "usb";
+    const eff = loraStreamNow() ? "lora" : "usb";
     lnk.innerHTML = `link <b>${eff === "lora" ? "LoRa" : "USB"}</b>`;
     // red when the stream contradicts the selector (wrong port picked)
     lnk.classList.toggle("bad", eff !== S.linkPref);
@@ -1759,14 +1872,14 @@ function updateDom() {
       `${(bs % 60).toFixed(1).padStart(4, "0")}</b>`);
 
   // readout cards
-  T("roLat", r.lat === null ? "—" : r.lat.toFixed(7) + "°");
+  T("roLat", r.lat == null ? "—" : r.lat.toFixed(7) + "°");
   T("roLatS", r.p ? `N ${fmt(r.p[0], 1)} m` : "");
-  T("roLon", r.lon === null ? "—" : r.lon.toFixed(7) + "°");
+  T("roLon", r.lon == null ? "—" : r.lon.toFixed(7) + "°");
   T("roLonS", r.p ? `E ${fmt(r.p[1], 1)} m` : "");
   const hasAgl = r.ral !== null && r.ral !== undefined;
   T("roAgl", hasAgl ? fmt(r.ral, 1) + " m" : "—");
   T("roAglS", hasAgl ? `±${fmt(r.sra, 2)} m (1σ) baro-fused` : "");
-  T("roAlt", r.alt === null ? "—" : fmt(r.alt, 1) + " m");
+  T("roAlt", r.alt == null ? "—" : fmt(r.alt, 1) + " m");
   T("roAltS", r.sp ? `±${fmt(r.sp[2], 2)} m (1σ)` : "");
   const vsUp = (r.rvs !== null && r.rvs !== undefined) ? r.rvs
              : (r.v ? -r.v[2] : null);
@@ -1791,7 +1904,7 @@ function updateDom() {
   T("roRpS", r.sa ? `±${fmt(r.sa[0], 2)}° / ±${fmt(r.sa[1], 2)}°` : "");
   T("roVned", r.v ? r.v.map(x => fmt(x, 2)).join("  ") : "—");
   T("roVnedS", r.sv ? `±${r.sv.map(x => fmt(x, 2)).join(" ")}` : "");
-  T("roBb", r.bb === null ? "—" : fmt(r.bb, 2) + " m");
+  T("roBb", r.bb == null ? "—" : fmt(r.bb, 2) + " m");
 
   // map coordinates + copy targets
   let cla = null, clo = null;
@@ -1816,16 +1929,17 @@ function updateDom() {
              nf(r.nmg, r.kmg), nf(r.nbr, r.kbr)].join("  "));
   T("fIgp", vec(r.igp, 2));
   T("fIgv", vec(r.igv, 2));
-  T("fImg", (r.img === null || r.img === undefined) ? "—" : fmt(r.img, 2) + " µT");
-  T("fIbr", (r.ibr === null || r.ibr === undefined) ? "—" : fmt(r.ibr, 2) + " m");
+  T("fImg", (r.img == null || r.img === undefined) ? "—" : fmt(r.img, 2) + " µT");
+  T("fIbr", (r.ibr == null || r.ibr === undefined) ? "—" : fmt(r.ibr, 2) + " m");
   HT("hImu", healthChips(r.himu));
   HT("hMag", healthChips(r.hmag));
   HT("hBar", healthChips(r.hbar));
   HT("hGps", healthChips(r.hgps));
-  T("hDrops", `imu ${r.dimu}  mag ${r.dmag}  bar ${r.dbar}  gps ${r.dgps}`);
-  T("hI2c", `${r.ei2c} / ${r.ri2c}`);
-  T("hDtx", `${r.dtx} / ${S.seqGaps}`);
-  T("hLmx", r.lmx + " µs");
+  T("hDrops", r.dimu == null ? "—"
+      : `imu ${r.dimu}  mag ${r.dmag}  bar ${r.dbar}  gps ${r.dgps}`);
+  T("hI2c", r.ei2c == null ? "—" : `${r.ei2c} / ${r.ri2c}`);
+  T("hDtx", `${nv(r.dtx)} / ${S.seqGaps}`);
+  T("hLmx", r.lmx == null ? "—" : `${r.lmx} µs`);
   T("hAlq", r.alq ? "clean static" : "DEGRADED");
 
   T("sAcc", vec(r.acc, 2));
@@ -1838,15 +1952,15 @@ function updateDom() {
   T("sBg", r.bg ? r.bg.map(x => fmt(x * R2D, 3)).join("  ") : "—");
   T("sBa", vec(r.ba, 3));
 
-  T("gFix", r.gfix === null ? "—"
+  T("gFix", r.gfix == null ? "—"
     : `${FIXNAMES[r.gfix] || r.gfix} / ${r.gsv} sats`);
-  T("gAcc", r.ghac === null ? "—"
+  T("gAcc", r.ghac == null ? "—"
     : `${fmt(r.ghac, 1)} / ${fmt(r.gvac, 1)} m · ${fmt(r.gsac, 2)} m/s`);
-  T("gPos", r.glat === null ? "—"
+  T("gPos", r.glat == null ? "—"
     : `${r.glat.toFixed(7)}, ${r.glon.toFixed(7)}`);
-  T("gAlt", r.galt === null ? "—" : fmt(r.galt, 1) + " m");
-  T("gAge", r.gage === null ? "—" : fmt(r.gage, 2) + " s");
-  T("gRate", r.grz === null ? "—" : fmt(r.grz, 1) + " Hz");
+  T("gAlt", r.galt == null ? "—" : fmt(r.galt, 1) + " m");
+  T("gAge", r.gage == null ? "—" : fmt(r.gage, 2) + " s");
+  T("gRate", r.grz == null ? "—" : fmt(r.grz, 1) + " Hz");
 
   if (S.consoleDirty) {
     S.consoleDirty = false;
@@ -2217,7 +2331,7 @@ function logCmd(t) {
 let txChain = Promise.resolve();
 function sendCmd(line) {
   logCmd("> " + line);
-  if (S.hdr && S.hdr.mode === "lora" && line.length > 48)
+  if (loraStreamNow() && line.length > 48)
     logCmd("< note: the LoRa uplink carries 48 chars - command will be cut");
   if (S.sim) { logCmd("< sim (no device)"); return; }
   if (!S.connected || !port || !port.writable) {
@@ -2249,6 +2363,8 @@ $("lbUnmute").onclick = () => sendCmd("$lora 1");
 $("lbMute").onclick = () => sendCmd("$lora 0");
 $("lbLoraQ").onclick = () => sendCmd("$lora?");
 $("lbBaseQ").onclick = () => sendCmd("$base?");
+$("lbRec").onclick = () => sendCmd("$lora rec");
+$("lbFlight").onclick = () => sendCmd("$lora flight");
 $("cmdCal").onclick = () => sendCmd("$cal");
 $("cmdZero").onclick = () => sendCmd("$zero");
 $("cmdMagCal").onclick = () => sendCmd("$magcal");
@@ -2550,28 +2666,40 @@ $("cmdRst").onclick = () => {
 /* ================= render loop ================= */
 let lastDraw = 0, lastChartDraw = 0, lastDomDraw = 0;
 function frame(ts) {
-  if (ts - lastDraw > 15) {   // ~60 fps instruments: every 50 Hz record shows
-    lastDraw = ts;
-    const r = S.paused ? S.view : S.last;
-    const now = r ? r._t : 0;
-    updatePadAnchor(r);
-    if (ts - lastChartDraw > 32) {   // strip charts at ~30 fps
-      lastChartDraw = ts;
-      for (const k in charts) {
-        if (charts[k].c.offsetParent !== null) charts[k].draw(now);
+  // The next frame is armed FIRST: an exception anywhere below (a record
+  // missing a field the drawer assumed - the 4 Hz LoRa stream carries a
+  // subset of the USB record) must never kill the render loop, which reads
+  // as "the page froze". The error is logged once to the command log.
+  requestAnimationFrame(frame);
+  try {
+    if (ts - lastDraw > 15) {   // ~60 fps instruments: every 50 Hz record shows
+      lastDraw = ts;
+      const r = S.paused ? S.view : S.last;
+      const now = r ? r._t : 0;
+      updatePadAnchor(r);
+      if (ts - lastChartDraw > 32) {   // strip charts at ~30 fps
+        lastChartDraw = ts;
+        for (const k in charts) {
+          if (charts[k].c.offsetParent !== null) charts[k].draw(now);
+        }
+        drawLcalGraph();
       }
-      drawLcalGraph();
+      drawDial(r);
+      drawRocket3D(r);
+      drawCompass(r);
+      drawMap(r);
+      if (ts - lastDomDraw > 32) {     // text readouts at ~30 fps is plenty
+        lastDomDraw = ts;
+        updateDom();
+      }
     }
-    drawDial(r);
-    drawRocket3D(r);
-    drawCompass(r);
-    drawMap(r);
-    if (ts - lastDomDraw > 32) {     // text readouts at ~30 fps is plenty
-      lastDomDraw = ts;
-      updateDom();
+  } catch (e) {
+    if (!S.frameErrLogged) {
+      S.frameErrLogged = true;
+      logCmd("< viewer draw error: " + ((e && e.message) || e));
+      console.error("viewer draw error", e);
     }
   }
-  requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
 
@@ -2619,12 +2747,15 @@ async function connect() {
 async function readLoop() {
   const decoder = new TextDecoder();
   let buf = "";
+  let idleRetries = 0;
   while (keepReading && port && port.readable) {
     reader = port.readable.getReader();
+    let gotData = false;
     try {
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
+        if (value && value.length) { gotData = true; idleRetries = 0; }
         buf += decoder.decode(value, { stream: true });
         let i;
         while ((i = buf.indexOf("\n")) >= 0) {
@@ -2634,9 +2765,23 @@ async function readLoop() {
         if (buf.length > 65536) buf = "";  // runaway line: resync
       }
     } catch (e) {
-      /* device unplugged or read error: loop retries while keepReading */
+      // device reset/unplugged, break, overrun: retried below while keepReading
+      logCmd("< serial read error: " + ((e && e.message) || e));
     } finally {
       try { reader.releaseLock(); } catch (e) {}
+    }
+    if (!keepReading) break;
+    if (!gotData) {
+      // A reader that ended without ever yielding data (the ESP32-C3 base
+      // station reboots when its port opens; a persistent break/overrun
+      // rejects every read at once): back off instead of re-arming in a hot
+      // loop that starves rendering, and give up after ~10 s of it.
+      if (++idleRetries > 20) {
+        logCmd("< serial: repeated read failures - disconnected");
+        disconnect();
+        break;
+      }
+      await new Promise(res => setTimeout(res, Math.min(500, 50 * idleRetries)));
     }
   }
 }
@@ -2658,6 +2803,28 @@ $("btnConnect").onclick = () => S.connected ? disconnect() : connect();
    filter and the expectation shown in the link badge. */
 S.linkPref = "usb";
 try { S.linkPref = localStorage.getItem("rn_link") || "usb"; } catch (e) {}
+/* Chart history window control: log slider 5 s .. 1 h, remembered in
+   localStorage; 0 = auto (chosen per stream cadence in updateDom). */
+function fmtWin(sec) {
+  if (sec < 60) return `${sec} s`;
+  if (sec < 3600) return `${(sec / 60).toFixed(sec % 60 ? 1 : 0)} min`;
+  return `${(sec / 3600).toFixed(1)} h`;
+}
+const sliderToWin = v => Math.round(5 * Math.pow(720, v / 100));
+const winToSlider = w => Math.round(100 * Math.log(w / 5) / Math.log(720));
+S.histSec = 0; S.histApplied = 0;
+try { S.histSec = parseInt(localStorage.getItem("rn_hist") || "0", 10) || 0; } catch (e) {}
+$("histSlider").oninput = () => {
+  S.histSec = sliderToWin(+$("histSlider").value);
+  try { localStorage.setItem("rn_hist", String(S.histSec)); } catch (e) {}
+  S.histApplied = 0;
+};
+$("histLbl").onclick = () => {
+  S.histSec = 0;
+  try { localStorage.removeItem("rn_hist"); } catch (e) {}
+  S.histApplied = 0;
+};
+
 function connectLabel() {
   return `Connect ${S.linkPref === "lora" ? "LoRa" : "USB"}`;
 }

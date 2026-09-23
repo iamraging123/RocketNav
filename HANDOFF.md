@@ -36,6 +36,14 @@ files listed in section 11; this page is the map and the current truth.
 - Rocket reflashed by the owner on 2026-09-20 with all of the above (the
   `hdr` line was confirmed); base station on COM6 flashed the same day.
   The offset-cal bench confirmation (section 9.1) is still owed.
+- **2026-09-21 (evening), uncommitted, NOT yet on the air:** the two-profile
+  range scheme of PLAN_LORA_RANGE.md is implemented end to end (codec,
+  driver, rocket MAC, base station, viewer, SCHEMA) - see 5.6 and PLAN §7b.
+  The `T` frame is now 54 bytes; the base still parses the old 53-byte one,
+  so **flash the base first, then the rocket, in any order that suits**.
+  The viewer also gained the LoRa declutter (`uo` class), link-quality
+  colours, the euler→quaternion rebuild, and the freeze fix (section 6).
+  Bench procedure to run next: PLAN §6 steps 1–3.
 - **Top open items:** section 9. The most urgent: confirm the owner is
   flashing the RIGHT sketch (section 2.3 — a wrong-sketch upload already
   happened once), confirm the offset-cal fix on the bench, watch the MG90S
@@ -189,6 +197,8 @@ RocketNav/
   HANDOFF.md            this file
   HANDOFF_MAG.md        magnetometer redesign brief + round-1 addendum + bench procedure
   PLAN_LORA_CONTROL.md  LoRa link + canard control plan (implemented)
+  PLAN_LORA_RANGE.md    range budget, profile/airtime tables, two-profile
+                        recovery design + walk-test plan (2026-09-21, NOT implemented)
   PLAN_LINKAGE_CAL.md   linkage calibration plan (implemented)
   DESIGN.md             ESKF math: states, exact Phi, Q, every measurement model
   SCHEMA.md             telemetry + command CONTRACT (every emitted field documented)
@@ -305,7 +315,27 @@ out a wedged slave after 10 consecutive I2C errors. Health bitmask per sensor
   fin test (`$cang test`, +10/−10/0°), per-fin release, all-off.
 
 ### 5.6 LoRa
-Rocket is TX-master every 250 ms (53-byte binary `T` state frame; `M` text
+**Two profiles since 2026-09-21 (PLAN_LORA_RANGE.md §4, §7b):** FLIGHT =
+SF7/500k, 54-byte `T` frame at 4 Hz; RECOVERY = SF11/125k, 27-byte `B`
+beacon every 10 s. The rocket switches itself to RECOVERY when SAFE + still
+30 s, or 20 s after the base's `K` keepalives (5 s) stop - never in ACTIVE,
+never muted; `$lora rec|flight` forces. The base follows by listening
+(10 s quiet → recovery, 30 s → scan 10 s/10 s), stays on FLIGHT until it has
+ever heard the rocket, sends a command's repeat on the other profile when
+unsure, and `$base flight|rec|auto` pins/frees it. Modem switch =
+`Sx1278::setModem()`; LowDataRateOptimize is automatic above 16 ms symbols.
+**On the air 2026-09-21 (bench):** `$lora rec` over RF → base followed
+after its 10 s rule → beacons decoded every 10 s at SF11 (rssi −26, snr
+12.8) → `$lora flight` back. The base's blind uplink repeat scales with
+the profile (`blindMs()`: 400 ms FLIGHT, 2.5 s RECOVERY) because on SF11 a
+640 ms command frame plus the rocket's immediate reply must clear before
+the repeat, or the repeat talks over the reply (that lost the first pong).
+Also verified the same evening: the rocket's keepalive-loss rule (base pinned
+to recovery → rocket moved itself to RECOVERY ~20 s after its last
+keepalive → base decoded its beacons), the base's scan (found a rocket that
+came back on FLIGHT), and `$lora flight` over SF11. Still owed from PLAN
+§6: the walk test and the ground test (the only ones that need distance).
+Rocket is TX-master every 250 ms (54-byte binary `T` state frame; `M` text
 frames alternate slots from a 4-deep msg queue); base listens-after-talk and
 sends `C` uplink command frames (twice; rocket dedupes by seq). **The uplink
 cue is RxDone + 30 ms (`UPLINK_CUE_MS`), not RxDone itself:** the rocket
@@ -317,8 +347,16 @@ Never move the cue earlier without re-running the 6-ping test. **DIO0 is
 advisory:** `Sx1278::poll()` also reads RegIrqFlags every 20 ms
 (`kFlagPollMs`), because on 2026-09-20 the base station went completely
 deaf (TX fine, rx 0 for minutes) with the symptoms of a loose DIO0 wire on
-GPIO1; `$base regs` shows the pin level next to the raw flag register to
-prove it either way. The base
+GPIO1. On 2026-09-21 the `dio0 N timer M` counters in `$base?` (how each
+reception was discovered) read `dio0 39 timer 0`, so the base's DIO0 net
+is fine and the fallback is insurance. The deaf episode coincided with an
+RF-path collapse instead: the rocket logged the base's uplink at
+**−106 dBm / SNR −11.8 dB** (normally −20 dBm on the bench), and the next
+run showed 2 CRC errors in 36 frames where every earlier run had 0 -
+i.e. an intermittent antenna connection (u.FL seating / spring-antenna
+joint) on one of the Ra-02s while the owner was handling the boards.
+Watch the LoRa bar's rssi and air-loss before blaming firmware. `$base
+regs` shows the DIO0 level next to the raw flag register. The base
 station translates everything to the same NDJSON the viewer speaks and stamps
 `hdr.mode:"lora"`. Viewer topbar has a USB|LoRa selector; LoRa display is
 4 Hz by design — judge responsiveness over USB.
@@ -364,6 +402,57 @@ refused unless IDLE or SAFE.
   gained "air loss (base)" (the base station's `loss`) and "ping round
   trip". Badges/device panel tolerate the base hdr (no `mmode`/`gmode`,
   `schema` instead of `sch`). `sendCmd` logs a note past 48 chars on LoRa.
+- **LoRa records are a SUBSET of the USB record (2026-09-21 freeze):** the
+  base station's `st` has no `q/sa/bg/ba/mag/mgr/pa/tc/glat/glon/galt/gage/
+  grz/fhz/lmx/dimu../dtx/ei2c/lre/ltx/lrx/lcrc`. A USB record always carries
+  every key (null when unknown), so `r.x === null ? "—" : r.x.toFixed()`
+  guards let `undefined` through and `updateDom` threw on `r.glat.toFixed`
+  - and because `frame()` armed the next `requestAnimationFrame` LAST, that
+  one exception killed the render loop: "the page froze, I can't move the
+  model". Rules now: `frame()` arms the next frame FIRST and wraps the body
+  in try/catch (first error goes to the command log as "viewer draw
+  error"); field guards are `== null` (null or undefined); raw `${r.x}`
+  interpolations go through `nv()`; `loraStreamNow()` (hdr.mode or a
+  `loss` key on the last record) decides LoRa presentation, because the
+  base's boot-time hdr is often torn (the ESP32-C3 reboots when its port
+  opens) - the base also repeats its hdr every 10 s now. The read loop backs
+  off on data-less reader failures instead of re-arming in a hot loop.
+  Test recipe: inject real base lines with `handleLine()` in Chrome, click
+  every tab, call each draw function inside try/catch, and scan the DOM for
+  "undefined"/"NaN". The 3-D model and compass read `q`, which the air
+  frame lacks: the st handler rebuilds it with `eulToQuat(r.eul)` (the
+  firmware's `quat_from_euler` ZYX construction, round-trip verified
+  against its `quat_to_euler`), so LoRa attitude renders like USB.
+- **Link-quality colours (2026-09-21, owner request):** rssi / margin /
+  snr / air-loss badges on the LoRa bar and the Comms Link rows carry
+  `good` (green, `--c2`) / `warn` (amber, `--c4`) / `bad` (red) classes
+  from `gradeRssi/gradeSnr/gradeLoss`. Bands for the SF7/500 kHz profile:
+  floor `LORA_FLOOR_DBM −117`; RSSI margin ≥ 20 dB green, 10–20 amber,
+  < 10 red; SNR ≥ 0 green, −5..0 amber, below red (the packet SNR estimate
+  saturates near +6 dB on a strong signal, so bench SNR of 5 dB at −21 dBm
+  is normal, not weak); air loss < 1 % green, < 5 % amber, else red. The
+  `margin` badge is the one number to watch on a walk test.
+- **LoRa declutter (2026-09-21, owner request):** elements the air frame
+  can never fill carry class `uo` (USB-only) and `body.lora .uo` hides
+  them: Filter / Calibration-table / Origin / Linkage-cal panels, the mag
+  raw chart, the baro-bias card, the mode / filter-Hz / gnss-Hz badges, and
+  the sensor/health/GNSS-raw/device/link rows for mag, baro, biases, drops,
+  i2c, raw fix, loop max, dtx, 1σ attitude. `body.lora` follows the STREAM
+  when connected (a USB stream shows everything even with LoRa selected)
+  and the selector when idle. The Ctrl-tab Calibration COMMAND panel stays
+  (its commands work over RF). When a future frame carries a field, remove
+  its `uo` tag - that is the whole contract. Likewise `fo` (flight-only:
+  gyro chart, accel dial, vertical-rate / speed / vel-NED cards, acc and
+  gyro sensor rows) hides under `body.recovery`, set while `hdr.prof` is
+  `recovery`, because the beacon carries no rates, accel or velocity.
+- **Chart history (2026-09-22):** `histSlider` (log, 5 s–1 h) sets every
+  chart's `win`; `rn_hist` in localStorage remembers it; clicking the
+  `history` badge returns to auto = 10 s, or 10 min on the 0.1 Hz recovery
+  beacon. Ring capacity is 16 384 points (~5 min at 50 Hz USB, ~68 min at
+  4 Hz). The record-rate window also stretches to three frame periods so
+  the beacon reads 0.1 Hz instead of "—". The base's "downlink quiet"
+  heartbeat now uses 25 s on RECOVERY (5 s on FLIGHT) so a 10 s beacon is
+  not reported as quiet.
 - **PARSE-CORE contract:** the code between `PARSE-CORE-BEGIN` and
   `PARSE-CORE-END` in script block 1 is extracted verbatim by
   `parse_test.js`. Keep the markers intact. Schema growth = extend
@@ -411,8 +500,8 @@ refused unless IDLE or SAFE.
 
 | Check | Result |
 |---|---|
-| firmware | 145,636 B flash, 20,080 B RAM |
-| base station (esp32c3, CDCOnBoot=cdc) | 305,800 B flash, 14,648 B RAM |
+| firmware | 147,276 B flash, 20,120 B RAM |
+| base station (esp32c3, CDCOnBoot=cdc) | 309,044 B flash, 14,680 B RAM |
 | eskf_test | 91/91 |
 | magfit_test | 10/10 |
 | link_test | 20/20 |
