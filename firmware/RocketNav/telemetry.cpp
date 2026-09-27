@@ -182,6 +182,13 @@ void emitMsg(uint64_t us, const char *txt) {
   finishLine(p, end);
 }
 
+void emitRaw(const char *json) {
+  char *p = line_, *end = line_ + TELEM_LINE_BYTES - 2;
+  p = ap_raw(p, end, json);
+  if (p < end) *p++ = '\n';
+  ringPush(line_, (uint32_t)(p - line_));
+}
+
 void emitLcal(uint64_t us, int8_t fin, uint8_t src, uint8_t n,
               const float deg[5], const float pus[5]) {
   char *p = line_, *end = line_ + TELEM_LINE_BYTES - 2;

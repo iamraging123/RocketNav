@@ -8,10 +8,13 @@
 // Two air profiles (PLAN_LORA_RANGE.md, lc::kProfileFlight / kProfileRecovery):
 // FLIGHT sends 54-byte 'T' state frames at 4 Hz; RECOVERY sends 27-byte 'B'
 // position beacons every 10 s at +17 dB of sensitivity. The rocket moves to
-// RECOVERY by itself when it has landed (SAFE and still for 30 s, reported by
-// the .ino) or when the base station's 'K' keepalives stop for 20 s - never
-// while ACTIVE (boost/coast: short frames dodge the spin fades), never while
-// muted. $lora rec / $lora flight force either way.
+// RECOVERY by itself on the landed EDGE (SAFE and still for 30 s, reported
+// by the .ino) or when the base station's 'K' keepalives have stopped for
+// 30 s after being heard - never while armed (ARMED / ACTIVE / BENCH: short
+// frames dodge the spin fades), never while muted. Arming returns the link
+// to FLIGHT unless the operator pinned RECOVERY. $lora rec / $lora flight
+// force either way. Every switch is deferred until the queued acknowledgement
+// has left on the OLD profile, so the base hears it.
 #pragma once
 
 #include <stdint.h>
@@ -31,8 +34,8 @@ void begin(Sx1278 *radio, StateFillFn fill);
 void service(uint64_t now_us);
 
 // Queue a msg-record text for downlink (truncated to 48 bytes; message
-// frames ride every other TX slot in FLIGHT, go out at once in RECOVERY;
-// oldest dropped when the ring is full).
+// frames ride every other TX slot in FLIGHT, go out paced at 1.5 s in
+// RECOVERY; oldest dropped when the ring is full).
 void queueMsg(const char *txt);
 
 // Uplink command line, if one arrived ("$..."). True at most once per frame.
@@ -41,11 +44,17 @@ bool popCommand(char *buf, int cap);
 void setMute(bool on);
 bool muted();
 
-// Profile control. setProfile re-programs the modem immediately.
-void setProfile(uint8_t prof, uint64_t now_us);  // lc::kProfFlight / kProfRecovery
-uint8_t profile();
-void noteLanded(bool landed);        // .ino: control SAFE and still for 30 s
-void setFlightLock(bool in_boost);   // .ino: control ACTIVE -> no auto-switch
+// Profile control. requestProfile schedules the switch: it happens once the
+// message queue has drained (the acknowledgement travels on the old
+// profile) or after 2 s. manual = operator command: pins RECOVERY against
+// the arm-time return to FLIGHT, or clears that pin.
+void requestProfile(uint8_t prof, uint64_t now_us, bool manual);
+uint8_t profile();            // the profile the modem is on now
+void noteLanded(bool landed); // .ino, 10 Hz: control SAFE and still for 30 s
+void noteArmed(uint64_t now_us);   // .ino: control just entered ARMED
+void setFlightLock(bool armed);    // .ino: ARMED / ACTIVE / BENCH
+// One-shot: true once per applied switch, with the new profile.
+bool takeProfileChange(uint8_t *to);
 
 // Telemetry / diagnostics
 uint32_t txCount();

@@ -129,6 +129,9 @@ void emitState(const TelemetryStateInfo &s);
 
 // Optional tap on every emitMsg text (the LoRa downlink forwards them).
 void setMsgTap(void (*tap)(const char *txt));
+// A complete JSON object built by the caller (no trailing newline): the
+// FRAM black-box dump uses this. Same ring, same never-block rule.
+void emitRaw(const char *json);
 
 // Linkage-cal table snapshot ("lcal" record). src: 0 = synthesized default,
 // 1 = calibrated table APPLIED to the servos (the flash write's success is

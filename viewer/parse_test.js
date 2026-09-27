@@ -126,5 +126,15 @@ check("lcal stage record keeps entry order",
       a.lcals[1].src === 2 && a.lcals[1].deg[0] === 10.5 &&
       a.lcals[1].pus[1] === 1120);
 
+// FRAM black-box dump records: t:"fram" with a part name in k.
+{
+  const p1 = parseLine('{"t":"fram","k":"evt","i":0,"ms":1000,"fl":0,"ph":1,"code":16,"arg":0,"aux":0,"seq":3}');
+  check("fram record classified with its part", p1.kind === "fram" && p1.rec.k === "evt" && p1.rec.code === 16);
+  const p2 = parseLine('{"t":"fram","i":0}');
+  check("fram record without a part is an error", p2.kind === "error");
+  const p3 = parseLine('{"t":"fram","k":"raw","a":32,"d":"00ff"}');
+  check("fram raw record keeps its hex", p3.kind === "fram" && p3.rec.a === 32 && p3.rec.d === "00ff");
+}
+
 console.log(`\n${pass}/${pass + fail} checks passed${fail ? " — FAILURES ABOVE" : ""}`);
 process.exit(fail ? 1 : 0);

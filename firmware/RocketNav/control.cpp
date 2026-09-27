@@ -62,8 +62,9 @@ void Control::setGains(float kp_rate, float ki_rate, float kp_ang) {
 
 void Control::setAngleMode(bool on) { cfg_.angle_mode = on; }
 
-void Control::enterSafe() {
+void Control::enterSafe(uint8_t why) {
   mode_ = CM_SAFE;
+  safe_reason_ = why;
   integ_ = 0;
   sat_ = false;
 }
@@ -92,7 +93,7 @@ void Control::tick(float dt, float p_dps, float roll_deg, float tilt_deg,
   if (!(dt > 0)) return;
   if (!imu_ok &&
       (mode_ == CM_ARMED || mode_ == CM_ACTIVE || mode_ == CM_BENCH)) {
-    enterSafe();
+    enterSafe(1);
   }
 
   float u_target = 0.0f;
@@ -114,9 +115,16 @@ void Control::tick(float dt, float p_dps, float roll_deg, float tilt_deg,
     }
     case CM_ACTIVE: {
       active_t_ += dt;
-      if (tilt_deg > cfg_.safe_tilt_deg || vd_mps > cfg_.safe_vd_mps ||
-          active_t_ > cfg_.safe_time_s) {
-        enterSafe();
+      if (tilt_deg > cfg_.safe_tilt_deg) {
+        enterSafe(2);
+        break;
+      }
+      if (vd_mps > cfg_.safe_vd_mps) {
+        enterSafe(3);
+        break;
+      }
+      if (active_t_ > cfg_.safe_time_s) {
+        enterSafe(4);
         break;
       }
       u_target = controlLaw(dt, p_dps, roll_deg);

@@ -222,24 +222,70 @@ PLAN_LORA_RANGE.md):
 
 The rocket transmits its downlink frame on the profile cadence and message
 frames on alternate slots when queued (in RECOVERY a queued message goes out
-at once); it listens (RX-continuous) the rest of the time. **The rocket
-switches to RECOVERY by itself** when control is SAFE and the IMU has been
-still for 30 s (landed), or when the base's `K` keepalives (one every 5 s)
-have stopped for 20 s after being heard - never while control is ACTIVE,
-never while muted. `$lora rec` / `$lora flight` force it either way and
-every switch is reported as `lora: -> RECOVERY …` / `lora: -> FLIGHT …`.
-**The base follows without negotiation:** once it has heard the rocket at
-all, 10 s of silence on FLIGHT makes it listen on RECOVERY, 30 s of silence
-there starts a 10 s-per-profile scan; `$base flight` / `$base rec` pin the
-listen profile and `$base auto` frees it. Until the first frame ever it stays
-on FLIGHT, and a command's repeat goes out on the other profile whenever the
-rocket has not been heard on the current one - so a muted bench rocket's
-Unmute gets through while the base is scanning. The base `hdr` carries
+paced 1.5 s apart so the base's cued uplink always finds the rocket
+listening); it listens (RX-continuous) the rest of the time. **The rocket
+switches to RECOVERY by itself** on the landed edge (control SAFE and the
+IMU still for 30 s - once per landing, so `$lora flight` afterwards sticks),
+or when the base's `K` keepalives (one every 5 s) have stopped for 30 s
+after being heard - never while armed (ARMED, ACTIVE or BENCH), never while
+muted. Arming returns the link to FLIGHT unless `$lora rec` pinned it.
+`$lora rec` / `$lora flight` force it either way; the acknowledgement
+(`lora: RECOVERY requested …`) leaves on the OLD profile and the modem
+re-tunes only after it (or after 2 s), then `lora: now RECOVERY profile …`
+reports the applied switch. **The base follows without negotiation:** it
+re-tunes 3 s after uplinking a `$lora rec|flight` itself; otherwise, once it
+has heard the rocket at all, 10 s of silence on FLIGHT makes it listen on
+RECOVERY, 30 s of silence there starts a 13 s-per-profile scan (not a
+multiple of the beacon period, so the phase walks); `$base flight` /
+`$base rec` pin the listen profile and `$base auto` frees it. No re-tune
+ever happens while the radio is transmitting. Until the first frame ever it
+stays on FLIGHT with both copies of a command on FLIGHT; after that a
+command's repeat goes out on the other profile whenever the rocket has not
+been heard on the current one. On RECOVERY a keepalive only ever goes out
+cued 30 ms after a beacon, never blind. The driver applies the SX1276/7/8
+errata register fixes (500 kHz sensitivity, sub-500 kHz spurious reception)
+on every modem write. The base `hdr` carries
 `prof` (`"flight"` / `"recovery"`) and `ohz` (4 / 0.1) and repeats every
 10 s and on every switch. Beacon-derived `st` records carry `"beacon":1`,
 euler to 2°, `ral` to 0.5 m and no rates/accel/velocity; flight `st` records
 carry `urssi` (RSSI of the base's uplink as heard by the rocket, null until
-one has arrived). The base station only
+one has arrived).
+
+## Black box (FRAM)
+
+An FM24CL16B (2 048 B FRAM, I2C1 @0x50–0x57) holds an **opt-in** flight
+record: nothing is written until `$fram start`, which also wipes the previous
+recording; `$fram stop` ends it. The recording flag persists in the FRAM, so
+a reset mid-flight resumes and logs a BOOT event with the reset cause and the
+last phase the heartbeat saw. Layout: 32 B header, 256 B reserved for a
+config mirror, 32 × 16 B event ring, 2 × 64 B flight summaries, a trajectory
+of 21 launch-segment records (2 Hz from launch detect, written once per
+flight) plus a 24-record rolling ring (0.25 Hz to landing; 0.5 Hz on a bench
+roll test), 8 B scratch. Every record carries CRC-8; torn records are skipped.
+
+`$fram dump` (USB only) streams the contents as `fram` records, one per
+20 ms, ending with `k:"end"`:
+
+| record | fields |
+|---|---|
+| `{"t":"fram","k":"hdr"}` | `us` boot µs, `rec` recording 0/1, `boot` boots while recording, `fl` launches since start, `cause` reset bits (1 pin, 2 power-on, 4 brownout, 8 software, 16 IWDG, 32 WWDG, 64 low-power), `evn`/`trn` counts, `hb` heartbeat ms, `lp` last phase, `werr`/`drop` write errors and queue drops, `i2cerr` |
+| `{"t":"fram","k":"evt"}` | `i` index (oldest first), `ms`, `fl`, `ph` control mode, `code`, `arg`, `aux`, `seq` |
+| `{"t":"fram","k":"trj"}` | `i` (launch segment first, then ring oldest first), `ms`, `fl`, `ph`, `ral` m, `vd` m/s, `spd` m/s, `eul` [roll,pitch,yaw] °, `a` g, `rr` roll rate °/s, `dn`/`de` m from the origin, `h` fresh bits |
+| `{"t":"fram","k":"sum"}` | `slot` (0 latest), `fl`, `launch`/`apoms`/`safems`/`landms` ms, `apo` m, `maxa` g, `maxspd` m/s, `maxrr` °/s, `maxtilt` °, `maxcdef` °, `safe` reason (1 IMU stale, 2 tilt, 3 descending, 4 timeout), `lat`/`lon`/`alt`, `dur` ms, `loss` %, `urssi` dBm, `boot` |
+| `{"t":"fram","k":"raw"}` | `a` address, `d` 32 bytes as hex (`$fram raw`, 64 lines) |
+
+Event codes (append only): 0x01 BOOT (`arg` = cause \| last phase << 8,
+`aux` = heartbeat ms), 0x02 REC START, 0x03/0x04 ALIGN DONE/DEGRADED (`aux`
+heading ×100), 0x05/0x06 GPS FIX/LOST (`arg` sats, `aux` hAcc ×10),
+0x07 ORIGIN, 0x10/0x11 ARM/DISARM, 0x12 LAUNCH (`aux` |a| g ×100),
+0x13 APOGEE and 0x15 LANDED (`aux` AGL ×10, written at landing),
+0x14 SAFE (`arg` reason), 0x16 BENCH (`arg` 1 start / 0 stop),
+0x20/0x21 SENSOR FAULT/OK (`arg` 0 imu 1 mag 2 baro 3 gnss, `aux` health
+bits), 0x22 I2C BUS RESET (`aux` count), 0x23/0x24 PCA ABSENT/OK,
+0x30 LORA PROFILE (`arg` profile), 0x31 LORA BASE LOST, 0x40/0x41 CFG
+SAVED/FAIL (`arg` 1 mag 2 linkage), 0x7E REC STOP, 0x7F MARK (`arg` n).
+Boot message: `fram FM24CL16B @0x50: OK - idle | OK - RECORDING (resumed
+across reset) | NOT FOUND (reset 0x..)`. The base station only
 transmits 30 ms after hearing a frame (the rocket needs its next radio poll
 to re-arm RX), so uplinks never collide with the rocket's own TX; with no
 downlink heard for 400 ms on FLIGHT / 2.5 s on RECOVERY (rocket muted, or
@@ -263,6 +309,7 @@ the viewer connects to either port unchanged. Null rules mirror the USB
 record: `v` is `null` unless the filter is in RUN (`fst` 3); `ral`/`rvs` are
 `null` outside WAIT_FIX/RUN/ATT_ONLY (`fst` 2–4). `$base?` typed in the console
 reports base-side link statistics without transmitting.
+| `$fram start\|stop\|?\|flight\|mark n\|test\|dump\|raw` | the FRAM black box (see "Black box"). `start` WIPES the previous recording and begins a new one (refused in ACTIVE); `stop` closes the flight summary and stops writing; `?` one status line (`fram: REC\|idle boot N fl N ev N tr N err N`); `flight` the latest summary as three lines (LoRa-sized); `mark n` a user marker event; `test` write/read on the spare bytes; `dump` / `raw` stream the contents as `fram` records - USB only, refused over LoRa. Nothing is written to the FRAM until `start` |
 | `$magdiag` | register-level magnetometer probe, independent of the driver and its init state (~60 ms stall): replies with msg records carrying WHO_AM_I, CTRL_REG1–5 vs the intended config, STATUS, the six output registers read three ways (burst without the I²C auto-increment bit — the shelf-driver transaction shape, burst with it, and single-byte reads), a 12-poll ZYXDA/data-change liveness count, and one `magdiag: VERDICT …` line naming the likely fault class |
 | `$zero` | zeroes the sensor-drop and I²C error/reset counters |
 | `$rst` | replies `cmd: rebooting`, drains the stream, resets the MCU |

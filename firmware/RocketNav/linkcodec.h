@@ -39,13 +39,15 @@ struct Profile {
   uint16_t preamble;    // symbols
   uint32_t period_us;   // downlink cadence
 };
-const Profile kProfileFlight = { 7, 500000ul, 5, 8, 250000ul };
-const Profile kProfileRecovery = { 11, 125000ul, 5, 12, 10000000ul };
+constexpr Profile kProfileFlight = { 7, 500000ul, 5, 8, 250000ul };
+constexpr Profile kProfileRecovery = { 11, 125000ul, 5, 12, 10000000ul };
 const uint8_t kProfFlight = 0;
 const uint8_t kProfRecovery = 1;
 
-// Symbol time in microseconds: the LowDataRateOptimize test (> 16 ms) and
-// airtime estimates share it.
+// Symbol time in microseconds, for airtime estimates and tests. The driver
+// (sx1278.cpp, codec-independent by design) applies the same 2^sf/bw rule
+// itself to decide LowDataRateOptimize (> 16 ms); the profile test below
+// pins the two to the same answer.
 inline uint32_t symbolTimeUs(uint8_t sf, uint32_t bw_hz) {
   return (uint32_t)((1000000ull << sf) / bw_hz);
 }
@@ -59,6 +61,11 @@ inline uint32_t symbolTimeUs(uint8_t sf, uint32_t bw_hz) {
 #define LC_LORA_SYNC 0x4B
 #define LC_LORA_PREAMBLE 8
 #define LC_TX_PERIOD_US 250000ul  // rocket state-frame cadence (4 Hz)
+static_assert(kProfileFlight.sf == LC_LORA_SF, "flight profile / macro drift");
+static_assert(kProfileFlight.bw_hz == LC_LORA_BW_HZ, "flight profile / macro drift");
+static_assert(kProfileFlight.cr_denom == LC_LORA_CR_DENOM, "flight profile / macro drift");
+static_assert(kProfileFlight.preamble == LC_LORA_PREAMBLE, "flight profile / macro drift");
+static_assert(kProfileFlight.period_us == LC_TX_PERIOD_US, "flight profile / macro drift");
 
 // Everything the 49-byte state payload carries, in engineering units.
 // Quantization (applied by packState, undone by parseState):

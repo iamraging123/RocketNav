@@ -87,9 +87,12 @@ class Control {
   bool saturated() const { return sat_; }
   float activeT() const { return active_t_; }
   const Config &config() const { return cfg_; }
+  // Why the last SAFE entry happened: 1 IMU stale, 2 tilt, 3 descending,
+  // 4 timeout. 0 = never. (On the wire in the FRAM black box: append only.)
+  uint8_t safeReason() const { return safe_reason_; }
 
  private:
-  void enterSafe();
+  void enterSafe(uint8_t why);
   // Shared rate/angle control law (integrator + anti-windup + saturation).
   // Returns the saturated pre-mix deflection; used by ACTIVE and BENCH.
   float controlLaw(float dt, float p_dps, float roll_deg);
@@ -104,6 +107,7 @@ class Control {
   float active_t_ = 0;
   bool sat_ = false;
   bool bench_hold_pending_ = false;  // capture roll target on first BENCH tick
+  uint8_t safe_reason_ = 0;
 };
 
 }  // namespace ctl

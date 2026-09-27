@@ -13,13 +13,24 @@ static uint8_t tx_seq_ = 0;
 static bool mute_ = false;
 
 // profile state
+static const uint8_t kNoPending = 0xFF;
 static uint8_t prof_ = lc::kProfFlight;
-static bool landed_ = false;
+static uint8_t pending_prof_ = kNoPending;
+static uint64_t pending_deadline_us_ = 0;
+static bool manual_rec_ = false;     // operator pinned RECOVERY
+static bool landed_ = false, landed_seen_ = false;
 static bool flight_lock_ = false;
 static bool ka_seen_ = false;
+static bool base_lost_ = false;
 static uint64_t last_base_us_ = 0;
-static const uint64_t kBaseLostUs = 20000000ull;   // 20 s without a keepalive
-static const uint64_t kSwitchSettleUs = 1000000ull; // first TX after a switch
+static bool change_flag_ = false;
+static uint8_t change_to_ = lc::kProfFlight;
+static uint64_t next_msg_ok_us_ = 0;  // RECOVERY message pacing
+static const uint64_t kBaseLostUs = 30000000ull;     // 30 s without a keepalive
+static const uint64_t kSwitchSettleUs = 1000000ull;  // first TX after a switch
+static const uint64_t kPendingMaxUs = 2000000ull;    // ack must leave within 2 s
+static const uint64_t kRecMsgGapUs = 1500000ull;     // RECOVERY: room for the
+                                                     // base's cued 0.6 s uplink
 
 // msg downlink ring
 static const int kMsgQ = 4;
@@ -52,10 +63,15 @@ void begin(Sx1278 *radio, StateFillFn fill) {
   n_tx_ = n_rx_ = n_ka_ = n_crc_ = 0;
   rssi_valid_ = false;
   prof_ = lc::kProfFlight;  // configure() at boot programmed the flight modem
-  landed_ = false;
+  pending_prof_ = kNoPending;
+  manual_rec_ = false;
+  landed_ = landed_seen_ = false;
   flight_lock_ = false;
   ka_seen_ = false;
+  base_lost_ = false;
   last_base_us_ = 0;
+  change_flag_ = false;
+  next_msg_ok_us_ = 0;
 }
 
 void queueMsg(const char *txt) {
@@ -81,24 +97,55 @@ bool popCommand(char *buf, int cap) {
 void setMute(bool on) { mute_ = on; }
 bool muted() { return mute_; }
 
-void setProfile(uint8_t p, uint64_t now_us) {
-  if (p != lc::kProfFlight && p != lc::kProfRecovery) return;
-  if (p == prof_) return;
+static void applyProfile(uint8_t p, uint64_t now_us) {
   const lc::Profile &pr = prof(p);
   if (radio_ != nullptr && radio_->present()) {
     radio_->setModem(pr.sf, pr.bw_hz, pr.cr_denom, pr.preamble);
   }
   prof_ = p;
   next_tx_us_ = now_us + kSwitchSettleUs;
+  next_msg_ok_us_ = 0;
   last_was_state_ = false;
-  last_base_us_ = now_us;  // give the base its scan time before "lost" again
+  last_base_us_ = now_us;  // the base needs its follow/scan time first
+  base_lost_ = false;
+  change_flag_ = true;
+  change_to_ = p;
 }
 
-static bool base_lost_ = false;
+void requestProfile(uint8_t p, uint64_t now_us, bool manual) {
+  if (p != lc::kProfFlight && p != lc::kProfRecovery) return;
+  if (manual) manual_rec_ = (p == lc::kProfRecovery);
+  if (p == prof_ && pending_prof_ == kNoPending) return;
+  if (p == prof_) { pending_prof_ = kNoPending; return; }  // cancelled
+  pending_prof_ = p;
+  pending_deadline_us_ = now_us + kPendingMaxUs;
+}
+
 uint8_t profile() { return prof_; }
-void noteLanded(bool landed) { landed_ = landed; }
-void setFlightLock(bool in_boost) { flight_lock_ = in_boost; }
+
+void noteLanded(bool landed) {
+  landed_ = landed;
+  if (!landed) landed_seen_ = false;  // re-arm the edge for the next landing
+}
+
+void noteArmed(uint64_t now_us) {
+  // A re-arm means another flight: the display link comes back unless the
+  // operator pinned RECOVERY.
+  if (!manual_rec_ && prof_ != lc::kProfFlight) {
+    requestProfile(lc::kProfFlight, now_us, false);
+  }
+  landed_seen_ = false;
+}
+
+void setFlightLock(bool armed) { flight_lock_ = armed; }
 bool baseLost() { return base_lost_; }
+
+bool takeProfileChange(uint8_t *to) {
+  if (!change_flag_) return false;
+  change_flag_ = false;
+  *to = change_to_;
+  return true;
+}
 
 static void noteBase(uint64_t now_us) {
   last_base_us_ = now_us;
@@ -161,6 +208,13 @@ static int packDownlink(uint8_t *frame) {
   return lc::packState(f, tx_seq_++, frame);
 }
 
+static void startTx(const uint8_t *frame, int len, uint64_t now_us) {
+  if (len > 0 && radio_->txStart(frame, (uint8_t)len)) {
+    n_tx_++;
+    if (prof_ == lc::kProfRecovery) next_msg_ok_us_ = now_us + kRecMsgGapUs;
+  }
+}
+
 void service(uint64_t now_us) {
   if (radio_ == nullptr || !radio_->present()) return;
 
@@ -168,29 +222,48 @@ void service(uint64_t now_us) {
   if (ev & Sx1278::EV_RXDONE) handleRx(now_us);
   if (ev & Sx1278::EV_CRCERR) n_crc_++;
 
-  // Self-directed move to the recovery profile: landed, or the base has
-  // gone quiet after once being heard. Never during boost/coast, never
-  // while muted (bench), never twice.
+  // Self-directed move to the recovery profile, on the landed EDGE or once
+  // the base has gone quiet after being heard. Never while armed, muted, or
+  // already leaving.
   base_lost_ = ka_seen_ && (now_us - last_base_us_) > kBaseLostUs;
   if (!mute_ && !flight_lock_ && prof_ == lc::kProfFlight &&
-      (landed_ || base_lost_)) {
-    setProfile(lc::kProfRecovery, now_us);
+      pending_prof_ == kNoPending) {
+    bool landed_edge = landed_ && !landed_seen_;
+    if (landed_edge || base_lost_) {
+      landed_seen_ = landed_;
+      queueMsg(landed_edge ? "lora: -> RECOVERY (landed)"
+                           : "lora: -> RECOVERY (base lost)");
+      requestProfile(lc::kProfRecovery, now_us, false);
+    }
+  }
+
+  // Apply a pending switch once the acknowledgement has left on the old
+  // profile (queue drained and the last frame off the air), or on timeout.
+  if (pending_prof_ != kNoPending && !radio_->txBusy() &&
+      (mq_count_ == 0 || now_us >= pending_deadline_us_)) {
+    uint8_t p = pending_prof_;
+    pending_prof_ = kNoPending;
+    applyProfile(p, now_us);
+    return;
   }
 
   if (mute_ || radio_->txBusy()) return;
 
-  // RECOVERY: replies must not wait for a 10 s slot - a queued message goes
-  // out at once (the base has just transmitted and is back in RX).
-  if (prof_ == lc::kProfRecovery && mq_count_ > 0) {
-    uint8_t frame[lc::kMaxFrame];
-    int len = packMsgFrame(frame);
-    if (len > 0 && radio_->txStart(frame, (uint8_t)len)) n_tx_++;
-    return;
-  }
-
   const uint64_t period = prof(prof_).period_us;
   if (next_tx_us_ == 0) next_tx_us_ = now_us + period;
-  if (now_us < next_tx_us_) return;
+  const bool slot_due = now_us >= next_tx_us_;
+
+  // RECOVERY: replies must not wait for a 10 s slot, but they are paced so
+  // the base's cued uplink (30 ms after our frame, ~0.6 s on SF11) always
+  // finds us listening, and the beacon slot always wins.
+  if (prof_ == lc::kProfRecovery && !slot_due && mq_count_ > 0 &&
+      now_us >= next_msg_ok_us_) {
+    uint8_t frame[lc::kMaxFrame];
+    int len = packMsgFrame(frame);
+    startTx(frame, len, now_us);
+    return;
+  }
+  if (!slot_due) return;
   next_tx_us_ += period;
   if (now_us > next_tx_us_ + 4ull * period) {
     next_tx_us_ = now_us + period;  // fell far behind: resync
@@ -199,14 +272,14 @@ void service(uint64_t now_us) {
   uint8_t frame[lc::kMaxFrame];
   int len = 0;
   // FLIGHT: messages ride every other slot at most - state frames keep cadence.
-  if (mq_count_ > 0 && last_was_state_) {
+  if (prof_ == lc::kProfFlight && mq_count_ > 0 && last_was_state_) {
     len = packMsgFrame(frame);
     last_was_state_ = false;
   } else {
     len = packDownlink(frame);
     last_was_state_ = true;
   }
-  if (len > 0 && radio_->txStart(frame, (uint8_t)len)) n_tx_++;
+  startTx(frame, len, now_us);
 }
 
 uint32_t txCount() { return n_tx_; }

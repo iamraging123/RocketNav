@@ -19,6 +19,11 @@
 #define R_PREAMBLE_MSB 0x20
 #define R_PAYLOAD_LEN 0x22
 #define R_MODEM_CFG3 0x26
+#define R_IF_FREQ2 0x2F        // errata 2.3
+#define R_IF_FREQ1 0x30
+#define R_DETECT_OPT 0x31
+#define R_HIGH_BW_OPT1 0x36    // errata 2.1
+#define R_HIGH_BW_OPT2 0x3A
 #define R_DIO_MAPPING1 0x40
 #define R_VERSION 0x42
 #define R_PA_DAC 0x4D
@@ -140,6 +145,23 @@ void Sx1278::writeModem(uint8_t sf, uint32_t bw_hz, uint8_t cr_denom,
   wr(R_MODEM_CFG3, (uint8_t)(0x04 | (tsym_us > 16000ul ? 0x08 : 0)));
   wr(R_PREAMBLE_MSB, (uint8_t)(preamble >> 8));
   wr(R_PREAMBLE_MSB + 1, (uint8_t)(preamble & 0xFF));
+  // SX1276/7/8 errata note, applied per bandwidth on every modem write:
+  //  2.1 sensitivity at 500 kHz: RegHighBwOptimize1/2 = 0x02 / 0x7F in the
+  //      410-525 MHz band (0x03 / automatic for narrower bandwidths);
+  //  2.3 spurious reception: 500 kHz uses the automatic IF (RegDetectOptimize
+  //      bit 7 set); 62.5-250 kHz need bit 7 clear and RegIfFreq2/1 =
+  //      0x40 / 0x00 (narrower bandwidths would also need a frequency
+  //      offset - not used here).
+  if (bw_code == 9) {
+    wr(R_HIGH_BW_OPT1, 0x02);
+    wr(R_HIGH_BW_OPT2, 0x7F);
+    wr(R_DETECT_OPT, (uint8_t)(rd(R_DETECT_OPT) | 0x80));
+  } else {
+    wr(R_HIGH_BW_OPT1, 0x03);
+    wr(R_DETECT_OPT, (uint8_t)(rd(R_DETECT_OPT) & 0x7F));
+    wr(R_IF_FREQ2, 0x40);
+    wr(R_IF_FREQ1, 0x00);
+  }
 }
 
 void Sx1278::setModem(uint8_t sf, uint32_t bw_hz, uint8_t cr_denom,

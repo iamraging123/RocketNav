@@ -43,6 +43,19 @@ static int32_t get32(const uint8_t *p) {
                    ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
 }
 
+// One CRC seal and one CRC check for every frame type: the two ends of the
+// link only agree if both use exactly these.
+static void sealFrame(uint8_t *out, int n) {
+  uint16_t c = crc16(out, n);
+  out[n] = (uint8_t)(c >> 8);
+  out[n + 1] = (uint8_t)(c & 0xFF);
+}
+
+static bool crcOk(const uint8_t *buf, int len) {
+  uint16_t c = crc16(buf, len - 2);
+  return buf[len - 2] == (uint8_t)(c >> 8) && buf[len - 1] == (uint8_t)(c & 0xFF);
+}
+
 int packState(const StateFields &f, uint8_t seq, uint8_t out[kMaxFrame]) {
   out[0] = kMagic;
   out[1] = kTypeState;
@@ -74,21 +87,8 @@ int packState(const StateFields &f, uint8_t seq, uint8_t out[kMaxFrame]) {
     *p++ = (uint8_t)((u < 0) ? ((u < -255) ? 255 : -u) : 0);
   }
   int n = (int)(p - out);
-  uint16_t c = crc16(out, n);
-  out[n] = (uint8_t)(c >> 8);
-  out[n + 1] = (uint8_t)(c & 0xFF);
+  sealFrame(out, n);
   return n + 2;
-}
-
-static void sealFrame(uint8_t *out, int n) {
-  uint16_t c = crc16(out, n);
-  out[n] = (uint8_t)(c >> 8);
-  out[n + 1] = (uint8_t)(c & 0xFF);
-}
-
-static bool crcOk(const uint8_t *buf, int len) {
-  uint16_t c = crc16(buf, len - 2);
-  return buf[len - 2] == (uint8_t)(c >> 8) && buf[len - 1] == (uint8_t)(c & 0xFF);
 }
 
 int packBeacon(const BeaconFields &b, uint8_t seq, uint8_t out[kMaxFrame]) {
@@ -154,9 +154,7 @@ bool parseState(const uint8_t *buf, int len, StateFields *f, uint8_t *seq) {
   const bool legacy = (len == kStateFrameLen - 1);
   if (len != kStateFrameLen && !legacy) return false;
   if (buf[0] != kMagic || buf[1] != kTypeState) return false;
-  uint16_t c = crc16(buf, len - 2);
-  if (buf[len - 2] != (uint8_t)(c >> 8) || buf[len - 1] != (uint8_t)(c & 0xFF))
-    return false;
+  if (!crcOk(buf, len)) return false;
   *seq = buf[2];
   const uint8_t *p = buf + 3;
   f->ms = (uint32_t)get32(p); p += 4;
@@ -195,9 +193,7 @@ int packText(uint8_t type, const char *txt, uint8_t seq,
   out[3] = (uint8_t)n;
   memcpy(out + 4, txt, (size_t)n);
   int total = 4 + n;
-  uint16_t c = crc16(out, total);
-  out[total] = (uint8_t)(c >> 8);
-  out[total + 1] = (uint8_t)(c & 0xFF);
+  sealFrame(out, total);
   return total + 2;
 }
 
@@ -207,9 +203,7 @@ bool parseText(const uint8_t *buf, int len, char *txt, int txt_cap,
   if (buf[1] != kTypeMsg && buf[1] != kTypeCmd) return false;
   int n = buf[3];
   if (n > kMaxText || len != 6 + n) return false;
-  uint16_t c = crc16(buf, len - 2);
-  if (buf[len - 2] != (uint8_t)(c >> 8) || buf[len - 1] != (uint8_t)(c & 0xFF))
-    return false;
+  if (!crcOk(buf, len)) return false;
   *type = buf[1];
   *seq = buf[2];
   int m = (n < txt_cap - 1) ? n : txt_cap - 1;

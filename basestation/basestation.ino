@@ -54,11 +54,26 @@ static uint32_t next_hdr_ms_ = 10000;
 // Listen profile machine (PLAN_LORA_RANGE.md section 4.3).
 #define FLIGHT_LOST_MS 10000     // silence on FLIGHT -> listen on RECOVERY
 #define RECOVERY_LOST_MS 30000   // silence on RECOVERY -> scan
-#define SCAN_DWELL_MS 10000      // scan: dwell per profile
+#define SCAN_DWELL_MS 13000      // scan: dwell per profile - NOT a multiple of
+                                 // the 10 s beacon period, so the phase walks
 static uint8_t prof_ = lc::kProfFlight;
 static bool prof_pinned_ = false;      // $base flight|rec
 static bool scanning_ = false;
 static uint32_t prof_since_ms_ = 0;
+// Every listen-profile change goes through scheduleListen(): it is applied
+// only when the radio is not transmitting (a modem write mid-packet would
+// truncate the frame on the air) and, for a followed $lora command, after
+// the rocket has had time to acknowledge on the old profile and re-tune.
+static uint8_t pending_listen_ = 0xFF;
+static uint32_t pending_listen_at_ms_ = 0;
+static const char *pending_why_ = "";
+static uint8_t follow_prof_ = 0xFF;   // $lora rec|flight just uplinked
+#define FOLLOW_GRACE_MS 3000          // rocket acks, then switches within 2 s
+static void scheduleListen(uint8_t p, const char *why, uint32_t delay_ms) {
+  pending_listen_ = p;
+  pending_why_ = why;
+  pending_listen_at_ms_ = millis() + delay_ms;
+}
 
 // Uplink, listen-after-talk: each command goes out twice (the rocket drops
 // the duplicate by seq), and each transmission waits for the NEXT downlink
@@ -96,6 +111,9 @@ static bool alt_restore_ = false;      // modem is on the other profile for a TX
 // Keepalive: one 5-byte 'K' every 5 s through the same cued path whenever no
 // command is pending. The rocket uses it only to detect a lost base.
 #define KEEPALIVE_MS 5000
+#define KA_BLIND_REC_MS 60000   // RECOVERY: a keepalive only ever goes out cued
+                                // 30 ms after a beacon - a blind one would
+                                // land on the beacon the link exists to carry
 static uint32_t next_ka_ms_ = 5000;
 static uint8_t ka_seq_ = 1;
 
@@ -120,9 +138,20 @@ static void modemFor(uint8_t p) {
   radio.setModem(pr.sf, pr.bw_hz, pr.cr_denom, pr.preamble);
 }
 
+// Every msg text - rocket messages, command echoes, base notes - is scrubbed
+// here so a quote or backslash can never break the NDJSON stream.
 static void emitMsg(const char *txt) {
+  char clean[128];
+  int j = 0;
+  for (int i = 0; txt[i] != 0 && j < (int)sizeof(clean) - 1; ++i) {
+    char c = txt[i];
+    if (c == '"' || c == '\\') c = '\'';
+    if ((uint8_t)c < 0x20) c = ' ';
+    clean[j++] = c;
+  }
+  clean[j] = 0;
   Serial.printf("{\"t\":\"msg\",\"us\":%lu,\"txt\":\"%s\"}\n",
-                (unsigned long)millis() * 1000ul, txt);
+                (unsigned long)millis() * 1000ul, clean);
 }
 
 static void emitHdr() {
@@ -261,18 +290,7 @@ static void emitBeacon(const lc::BeaconFields &f, uint8_t seq) {
 
 static void emitText(const char *txt, uint8_t seq) {
   bumpSeq(seq);
-  // Rocket messages are plain ASCII without quotes; scrub defensively so a
-  // stray character can never break the JSON stream.
-  char clean[lc::kMaxText + 1];
-  int j = 0;
-  for (int i = 0; txt[i] != 0 && j < lc::kMaxText; ++i) {
-    char c = txt[i];
-    if (c == '"' || c == '\\') c = '\'';
-    if ((uint8_t)c < 0x20) c = ' ';
-    clean[j++] = c;
-  }
-  clean[j] = 0;
-  emitMsg(clean);
+  emitMsg(txt);  // scrubbed there
 }
 
 static void sendCmd(const char *cmd) {
@@ -291,7 +309,8 @@ static void queueKeepalive() {
   pend_len_ = lc::packKeepalive(ka_seq_++, pend_);
   pend_left_ = 1;
   pend_is_cmd_ = false;
-  pend_send_at_ms_ = millis() + blindMs();
+  pend_send_at_ms_ = millis() +
+      (prof_ == lc::kProfRecovery ? KA_BLIND_REC_MS : blindMs());
 }
 
 // Called every loop pass; downlink_heard = a frame was just read out of the
@@ -311,12 +330,17 @@ static void serviceUplink(bool downlink_heard) {
   if ((int32_t)(ms - pend_send_at_ms_) < 0 || radio.txBusy()) return;
   // The repeat of a command goes out on the other profile when the rocket
   // has not been heard on this one (rocket still on FLIGHT while we scan).
-  bool alt = pend_is_cmd_ && pend_left_ == 1 && !heardSinceSwitch();
+  bool alt = pend_is_cmd_ && pend_left_ == 1 && rx_frames_ > 0 &&
+             !heardSinceSwitch();
   if (alt) modemFor(otherProf(prof_));
   if (radio.txStart(pend_, (uint8_t)pend_len_)) {
     pend_left_--;
     pend_send_at_ms_ = ms + blindMs();  // the repeat waits the same way
     if (alt) alt_restore_ = true;
+    if (pend_left_ == 0 && pend_is_cmd_ && follow_prof_ != 0xFF) {
+      scheduleListen(follow_prof_, "following $lora", FOLLOW_GRACE_MS);
+      follow_prof_ = 0xFF;
+    }
   } else if (alt) {
     modemFor(prof_);
   }
@@ -341,7 +365,7 @@ static void handleLine(char *s) {
   if (strcmp(s, "$base flight") == 0 || strcmp(s, "$base rec") == 0) {
     prof_pinned_ = true;
     scanning_ = false;
-    listenOn(s[6] == 'r' ? lc::kProfRecovery : lc::kProfFlight, "pinned");
+    scheduleListen(s[6] == 'r' ? lc::kProfRecovery : lc::kProfFlight, "pinned", 0);
     return;
   }
   if (strcmp(s, "$base auto") == 0) {
@@ -364,6 +388,9 @@ static void handleLine(char *s) {
     emitMsg(b);
     return;
   }
+  if (strcmp(s, "$lora rec") == 0) follow_prof_ = lc::kProfRecovery;
+  else if (strcmp(s, "$lora flight") == 0) follow_prof_ = lc::kProfFlight;
+  else follow_prof_ = 0xFF;
   sendCmd(s);
   char b[96];
   snprintf(b, sizeof(b), "base: uplinked %s", s);
@@ -372,6 +399,7 @@ static void handleLine(char *s) {
 
 // Follow the rocket's profile without negotiation (section 4.3 of the plan).
 static void serviceProfile(uint32_t ms) {
+  if (radio.txBusy() || alt_restore_ || pending_listen_ != 0xFF) return;
   if (prof_pinned_ || rx_frames_ == 0) return;  // never heard it: stay FLIGHT
   uint32_t ref = ((int32_t)(last_rx_ms_ - prof_since_ms_) >= 0) ? last_rx_ms_
                                                                   : prof_since_ms_;
@@ -380,8 +408,8 @@ static void serviceProfile(uint32_t ms) {
     if (prof_ == lc::kProfFlight && quiet > FLIGHT_LOST_MS) {
       listenOn(lc::kProfRecovery, "flight quiet 10 s");
     } else if (prof_ == lc::kProfRecovery && quiet > RECOVERY_LOST_MS) {
-      scanning_ = true;
       listenOn(lc::kProfFlight, "recovery quiet 30 s, scanning");
+      scanning_ = true;
     }
     return;
   }
@@ -476,6 +504,13 @@ void loop() {
         emitMsg(q);
       }
     }
+  }
+  if (pending_listen_ != 0xFF && (int32_t)(ms - pending_listen_at_ms_) >= 0 &&
+      !radio.txBusy() && !alt_restore_) {
+    uint8_t p = pending_listen_;
+    pending_listen_ = 0xFF;
+    scanning_ = false;
+    listenOn(p, pending_why_);
   }
   serviceProfile(ms);
   if ((int32_t)(ms - next_hdr_ms_) >= 0) {

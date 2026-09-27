@@ -34,6 +34,8 @@
 #include "control.h"
 #include "link.h"
 #include "linkcodec.h"
+#include "fm24cl16b.h"
+#include "framlog.h"
 #include "servos.h"
 #include "sx1278.h"
 
@@ -354,9 +356,31 @@ static Sx1278 lora;
 static Servos servos;
 static ctl::Control control;
 // LoRa profile hooks (PLAN_LORA_RANGE.md): stillness timer for the landed
-// test and the last profile reported, so every switch becomes a msg.
+// test and the last control mode seen, for the arm-time return to FLIGHT.
 static uint64_t still_since_us_ = 0;
-static uint8_t link_prof_seen_ = 0;
+static uint8_t ctl_mode_seen_ = 0;
+
+// ---- FRAM black box (framlog.h): OPT-IN recording of events, a coarse
+// trajectory and a per-flight summary. Nothing is written until $fram start
+// (USB or LoRa); $fram stop ends it. Dump/raw are USB-only.
+static Fm24cl16b fram;
+static fl::FramLog framlog;
+static bool cmd_from_lora_ = false;
+static uint8_t fb_reset_cause_ = 0;
+static bool fbStoreRead(void *, uint16_t a, uint8_t *b, uint16_t n) { return fram.read(a, b, n); }
+static bool fbStoreWrite(void *, uint16_t a, const uint8_t *b, uint16_t n) { return fram.write(a, b, n); }
+static float last_tilt_deg_ = 0, last_rollrate_dps_ = 0;
+static uint64_t next_traj_us_ = 0, next_hb_us_ = 0;
+static bool fb_init_ = true;                    // first pass after start: snapshot, no events
+static uint8_t fb_prev_mode_ = 0;
+static bool fb_prev_fault_[4] = { false, false, false, false };
+static uint8_t fb_fault_cnt_[4] = { 0, 0, 0, 0 };   // 10 Hz passes in the new state
+static uint32_t fb_prev_busresets_ = 0;
+static bool fb_prev_pca_ = true, fb_prev_fix_ = false, fb_prev_lost_ = false;
+static fl::Summary fb_sum_;                     // maxima of the flight in progress
+static bool fb_inflight_ = false;
+static uint8_t fb_dump_stage_ = 0, fb_dump_i_ = 0;  // 0 idle 1 hdr 2 evt 3 trj 4 sum 5 raw 6 end
+static char *fb_cmd_save_ = nullptr;             // strtok_r state handed to framCommand
 static uint64_t arm_pend_us_ = 0;  // $arm two-step confirmation window
 static int lcal_fin_ = -1;         // linkage-cal session fin, -1 = idle
 static LinkageCal lcal_stage_;     // points collected this session
@@ -411,12 +435,14 @@ static const int32_t COST_TELEM_US = 700;
 static const int32_t COST_SERVICE_US = 600;  // includes one LED strip push
 static const int32_t COST_RADIO_US = 400;    // flag poll or one FIFO load
 static const int32_t COST_SERVO_US = 700;    // up to 4 short PCA writes
+static const uint32_t FRAM_POLL_US = 20000;  // 50 Hz: one <=28 B FRAM write or one dump line
+static const int32_t COST_FRAM_US = 800;
                                              // (<=120 us, IRQs masked)
 static const int32_t SLACK_MARGIN_US = 150;
 
 static uint64_t next_imu_ = 0, next_mag_ = 0, next_baro_ = 0, next_gnss_ = 0,
                 next_telem_ = 0, next_service_ = 0, next_radio_ = 0,
-                next_servo_ = 0;
+                next_servo_ = 0, next_fram_ = 0;
 // PCA9685 re-probe with backoff (10 Hz service slot): the servo controller
 // gets the same recovery machinery every sensor on this bus has, instead of
 // one boot probe deciding the whole session.
@@ -582,6 +608,348 @@ static void lcalDump(uint64_t now) {
   }
 }
 
+// ---- FRAM black box glue ---------------------------------------------
+static uint32_t nowMs(uint64_t now) { return (uint32_t)(now / 1000ull); }
+
+static float fbAccelG() {
+  const float *a = sensors.lastAccel();
+  return sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]) / 9.80665f;
+}
+
+static uint8_t fbHealthBits() {
+  const SensorHealth &qi = sensors.imuHealth(), &qm = sensors.magHealth(),
+                     &qb = sensors.baroHealth(), &qg = sensors.gnssHealth();
+  return (uint8_t)((qi.fresh ? 1 : 0) | (qm.fresh ? 2 : 0) | (qb.fresh ? 4 : 0) |
+                   (qg.fresh ? 8 : 0));
+}
+
+static void fbTraj(uint64_t now) {
+  fl::Traj t;
+  memset(&t, 0, sizeof(t));
+  t.t_ms = nowMs(now);
+  t.phase = (uint8_t)control.mode();
+  uint8_t fs = (uint8_t)filter.state();
+  t.ral_m = filter.relAlt();
+  const float *v = filter.vel();
+  if (fs >= eskf::FS_WAIT_FIX) t.vd_mps = v[2];
+  if (fs == eskf::FS_RUN) {
+    t.spd_mps = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    t.dn_m = filter.pos()[0];
+    t.de_m = filter.pos()[1];
+  }
+  float e[3];
+  filter.euler(e);
+  for (int i = 0; i < 3; ++i) t.eul_deg[i] = e[i] * nav::RAD2DEG;
+  t.amag_g = fbAccelG();
+  t.rollrate_dps = last_rollrate_dps_;
+  t.health = fbHealthBits();
+  framlog.traj(t);
+}
+
+static void fbFlightBegin(uint32_t ms) {
+  memset(&fb_sum_, 0, sizeof(fb_sum_));
+  fb_sum_.launch_ms = ms;
+  fb_sum_.flight = framlog.header().flight;
+  fb_sum_.boot_count = framlog.header().boot_count;
+  fb_inflight_ = true;
+}
+
+static void fbFlightEnd(uint32_t ms, uint8_t phase, bool landed) {
+  if (!fb_inflight_) return;
+  fb_sum_.land_ms = ms;
+  fb_sum_.dur_ms = ms - fb_sum_.launch_ms;
+  double lat = 0, lon = 0, alt = 0;
+  if (filter.geodetic(&lat, &lon, &alt)) {
+    fb_sum_.lat_deg = lat;
+    fb_sum_.lon_deg = lon;
+    fb_sum_.alt_msl_m = (float)alt;
+  }
+  framlog.event(ms, phase, fl::EV_APOGEE, 0, (int32_t)lroundf(fb_sum_.apogee_m * 10.0f));
+  if (landed) framlog.event(ms, phase, fl::EV_LANDED, 0, (int32_t)lroundf(filter.relAlt() * 10.0f));
+  framlog.summary(fb_sum_);
+  fb_inflight_ = false;
+}
+
+// 10 Hz: phase transitions, faults, trajectory cadence, maxima, heartbeat.
+static void blackboxService(uint64_t now) {
+  if (!framlog.recording()) return;
+  const uint32_t ms = nowMs(now);
+  const uint8_t m = (uint8_t)control.mode();
+  const SensorHealth *hq[4] = { &sensors.imuHealth(), &sensors.magHealth(),
+                                &sensors.baroHealth(), &sensors.gnssHealth() };
+  bool fault[4];
+  for (int i = 0; i < 4; ++i) fault[i] = hq[i]->present && !hq[i]->fresh;
+  const GnssFix &pv = sensors.lastPvt();
+  bool fix = sensors.everHadPvt() && pv.fix_type >= 3;
+  bool lost = link::baseLost();
+  if (fb_init_) {  // snapshot the world as it is; only CHANGES are events
+    fb_init_ = false;
+    fb_prev_mode_ = m;
+    for (int i = 0; i < 4; ++i) fb_prev_fault_[i] = fault[i];
+    fb_prev_busresets_ = sensors.busResets();
+    fb_prev_pca_ = servos.present();
+    fb_prev_fix_ = fix;
+    fb_prev_lost_ = lost;
+    next_traj_us_ = next_hb_us_ = now;
+  }
+  if (m != fb_prev_mode_) {
+    if (fb_prev_mode_ == ctl::CM_BENCH) framlog.event(ms, m, fl::EV_BENCH, 0, 0);
+    if (m == ctl::CM_ARMED) framlog.event(ms, m, fl::EV_ARM, 0, 0);
+    else if (m == ctl::CM_IDLE) framlog.event(ms, m, fl::EV_DISARM, 0, 0);
+    else if (m == ctl::CM_ACTIVE) {
+      framlog.newFlight();
+      framlog.event(ms, m, fl::EV_LAUNCH, 0, (int32_t)lroundf(fbAccelG() * 100.0f));
+      fbFlightBegin(ms);
+    } else if (m == ctl::CM_SAFE) {
+      framlog.event(ms, m, fl::EV_SAFE, control.safeReason(), 0);
+      if (fb_inflight_) { fb_sum_.safe_reason = control.safeReason(); fb_sum_.safe_ms = ms; }
+    } else if (m == ctl::CM_BENCH) {
+      framlog.event(ms, m, fl::EV_BENCH, 1, 0);
+    }
+    if (fb_prev_mode_ == ctl::CM_ACTIVE && m == ctl::CM_IDLE) fbFlightEnd(ms, m, false);
+    fb_prev_mode_ = m;
+  }
+  // A sensor fault is logged only after 0.5 s in the new state: the baroâs
+  // fresh flag flickers for ~100 ms about once a second on the bench and
+  // each flicker would otherwise cost two of the 32 event slots.
+  for (int i = 0; i < 4; ++i) {
+    if (fault[i] != fb_prev_fault_[i]) {
+      if (++fb_fault_cnt_[i] >= 5) {
+        fb_fault_cnt_[i] = 0;
+        fb_prev_fault_[i] = fault[i];
+        framlog.event(ms, m, fault[i] ? fl::EV_SENSOR_FAULT : fl::EV_SENSOR_OK, (int16_t)i,
+                      (int32_t)hq[i]->bits());
+      }
+    } else {
+      fb_fault_cnt_[i] = 0;
+    }
+  }
+  if (sensors.busResets() != fb_prev_busresets_) {
+    fb_prev_busresets_ = sensors.busResets();
+    framlog.event(ms, m, fl::EV_BUS_RESET, 0, (int32_t)fb_prev_busresets_);
+  }
+  if (servos.present() != fb_prev_pca_) {
+    fb_prev_pca_ = servos.present();
+    framlog.event(ms, m, fb_prev_pca_ ? fl::EV_PCA_OK : fl::EV_PCA_ABSENT, 0, 0);
+  }
+  if (fix != fb_prev_fix_) {
+    fb_prev_fix_ = fix;
+    framlog.event(ms, m, fix ? fl::EV_GPS_FIX : fl::EV_GPS_LOST, (int16_t)pv.num_sv,
+                  (int32_t)lroundf(pv.hacc_m * 10.0f));
+  }
+  if (lost != fb_prev_lost_) {
+    fb_prev_lost_ = lost;
+    if (lost) framlog.event(ms, m, fl::EV_LORA_BASE_LOST, 0, 0);
+  }
+  // Maxima of the flight in progress.
+  if (fb_inflight_) {
+    float ral = filter.relAlt();
+    if (ral > fb_sum_.apogee_m) { fb_sum_.apogee_m = ral; fb_sum_.apogee_ms = ms; }
+    float ag = fbAccelG();
+    if (ag > fb_sum_.max_a_g) fb_sum_.max_a_g = ag;
+    if (filter.state() == eskf::FS_RUN) {
+      const float *v = filter.vel();
+      float sp = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+      if (sp > fb_sum_.max_spd_mps) fb_sum_.max_spd_mps = sp;
+    }
+    if (fabsf(last_rollrate_dps_) > fabsf(fb_sum_.max_rollrate_dps)) fb_sum_.max_rollrate_dps = last_rollrate_dps_;
+    if (last_tilt_deg_ > fb_sum_.max_tilt_deg) fb_sum_.max_tilt_deg = last_tilt_deg_;
+    for (int i = 0; i < 4; ++i) {
+      if (fabsf(control.deflDeg()[i]) > fabsf(fb_sum_.max_cdef_deg)) fb_sum_.max_cdef_deg = control.deflDeg()[i];
+    }
+    if (link::rssiValid()) {
+      int16_t r = link::lastRssiDbm();
+      if (fb_sum_.min_urssi == 0 || r < fb_sum_.min_urssi) fb_sum_.min_urssi = (int8_t)(r < -127 ? -127 : r);
+    }
+    // Landed: SAFE and still for 30 s (same test the LoRa MAC uses).
+    if (m == ctl::CM_SAFE && still_since_us_ != 0 && (now - still_since_us_) >= 30000000ull) {
+      fbFlightEnd(ms, m, true);
+    }
+  }
+  // Trajectory cadence by phase: 2 Hz through the launch segment, then
+  // 0.25 Hz to landing; 0.5 Hz on a bench roll test.
+  uint64_t period = 0;
+  if (m == ctl::CM_ACTIVE) period = (framlog.header().tl_n < fl::kTrajLaunchN) ? 500000ull : 4000000ull;
+  else if (m == ctl::CM_SAFE && fb_inflight_) period = 4000000ull;
+  else if (m == ctl::CM_BENCH) period = 2000000ull;
+  if (period != 0 && now >= next_traj_us_) {
+    next_traj_us_ = now + period;
+    fbTraj(now);
+  }
+  if (now >= next_hb_us_) {
+    next_hb_us_ = now + 1000000ull;
+    framlog.heartbeat(ms, m);
+  }
+}
+
+// One dump line per fram slot. Reads are synchronous (<= 64 B), then one
+// NDJSON "fram" record goes into the telemetry ring.
+static void fbDumpStep(uint64_t now) {
+  char b[560];
+  const fl::Header &h = framlog.header();
+  switch (fb_dump_stage_) {
+    case 1: {
+      snprintf(b, sizeof(b),
+               "{\"t\":\"fram\",\"k\":\"hdr\",\"us\":%lu,\"rec\":%d,\"boot\":%u,\"fl\":%u,"
+               "\"cause\":%u,\"evn\":%u,\"trn\":%u,\"hb\":%lu,\"lp\":%u,\"werr\":%lu,\"drop\":%lu,"
+               "\"i2cerr\":%lu}",
+               (unsigned long)now, framlog.recording() ? 1 : 0, (unsigned)h.boot_count,
+               (unsigned)h.flight, (unsigned)h.reset_cause, (unsigned)h.evt_n,
+               (unsigned)framlog.trajCount(), (unsigned long)h.hb_ms, (unsigned)h.last_phase,
+               (unsigned long)framlog.writeErrors(), (unsigned long)framlog.dropped(),
+               (unsigned long)fram.errors());
+      telem::emitRaw(b);
+      fb_dump_stage_ = 2;
+      fb_dump_i_ = 0;
+      return;
+    }
+    case 2: {
+      if (fb_dump_i_ >= framlog.eventCount()) { fb_dump_stage_ = 3; fb_dump_i_ = 0; return; }
+      fl::Event e;
+      uint8_t i = fb_dump_i_++;
+      if (!framlog.readEvent(i, &e)) return;  // torn: skipped
+      snprintf(b, sizeof(b),
+               "{\"t\":\"fram\",\"k\":\"evt\",\"i\":%u,\"ms\":%lu,\"fl\":%u,\"ph\":%u,"
+               "\"code\":%u,\"arg\":%d,\"aux\":%ld,\"seq\":%u}",
+               (unsigned)i, (unsigned long)e.t_ms, (unsigned)e.flight, (unsigned)e.phase,
+               (unsigned)e.code, (int)e.arg, (long)e.aux, (unsigned)e.seq);
+      telem::emitRaw(b);
+      return;
+    }
+    case 3: {
+      if (fb_dump_i_ >= framlog.trajCount()) { fb_dump_stage_ = 4; fb_dump_i_ = 0; return; }
+      fl::Traj t;
+      uint8_t i = fb_dump_i_++;
+      if (!framlog.readTraj(i, &t)) return;
+      snprintf(b, sizeof(b),
+               "{\"t\":\"fram\",\"k\":\"trj\",\"i\":%u,\"ms\":%lu,\"fl\":%u,\"ph\":%u,"
+               "\"ral\":%.1f,\"vd\":%.1f,\"spd\":%.1f,\"eul\":[%.0f,%.0f,%.0f],\"a\":%.1f,"
+               "\"rr\":%.0f,\"dn\":%.0f,\"de\":%.0f,\"h\":%u}",
+               (unsigned)i, (unsigned long)t.t_ms, (unsigned)t.flight, (unsigned)t.phase,
+               (double)t.ral_m, (double)t.vd_mps, (double)t.spd_mps, (double)t.eul_deg[0],
+               (double)t.eul_deg[1], (double)t.eul_deg[2], (double)t.amag_g,
+               (double)t.rollrate_dps, (double)t.dn_m, (double)t.de_m, (unsigned)t.health);
+      telem::emitRaw(b);
+      return;
+    }
+    case 4: {
+      if (fb_dump_i_ >= fl::kSumN) { fb_dump_stage_ = 6; return; }
+      fl::Summary sm;
+      uint8_t slot = fb_dump_i_++;
+      if (!framlog.readSummary(slot, &sm)) return;
+      snprintf(b, sizeof(b),
+               "{\"t\":\"fram\",\"k\":\"sum\",\"slot\":%u,\"fl\":%u,\"launch\":%lu,\"apo\":%.1f,"
+               "\"apoms\":%lu,\"maxa\":%.1f,\"maxspd\":%.1f,\"maxrr\":%.0f,\"maxtilt\":%.0f,"
+               "\"maxcdef\":%.2f,\"safe\":%u,\"safems\":%lu,\"landms\":%lu,\"lat\":%.7f,"
+               "\"lon\":%.7f,\"alt\":%.0f,\"dur\":%lu,\"loss\":%u,\"urssi\":%d,\"boot\":%u}",
+               (unsigned)slot, (unsigned)sm.flight, (unsigned long)sm.launch_ms, (double)sm.apogee_m,
+               (unsigned long)sm.apogee_ms, (double)sm.max_a_g, (double)sm.max_spd_mps,
+               (double)sm.max_rollrate_dps, (double)sm.max_tilt_deg, (double)sm.max_cdef_deg,
+               (unsigned)sm.safe_reason, (unsigned long)sm.safe_ms, (unsigned long)sm.land_ms,
+               sm.lat_deg, sm.lon_deg, (double)sm.alt_msl_m, (unsigned long)sm.dur_ms,
+               (unsigned)sm.loss_pct, (int)sm.min_urssi, (unsigned)sm.boot_count);
+      telem::emitRaw(b);
+      return;
+    }
+    case 5: {  // raw: 64 lines of 32 bytes
+      if (fb_dump_i_ >= 64) { fb_dump_stage_ = 6; return; }
+      uint8_t raw[32];
+      uint16_t addr = (uint16_t)(fb_dump_i_ * 32);
+      fb_dump_i_++;
+      if (!framlog.readRaw(addr, raw, 32)) return;
+      char hex[65];
+      for (int i = 0; i < 32; ++i) snprintf(hex + i * 2, 3, "%02x", raw[i]);
+      snprintf(b, sizeof(b), "{\"t\":\"fram\",\"k\":\"raw\",\"a\":%u,\"d\":\"%s\"}", (unsigned)addr, hex);
+      telem::emitRaw(b);
+      return;
+    }
+    case 6:
+      telem::emitRaw("{\"t\":\"fram\",\"k\":\"end\"}");
+      fb_dump_stage_ = 0;
+      return;
+    default:
+      fb_dump_stage_ = 0;
+      return;
+  }
+}
+
+static void framSlot(uint64_t now) {
+  (void)now;
+  if (fram.present()) framlog.service();
+}
+
+static void framCommand(uint64_t now, const char *a) {
+  const uint32_t ms = nowMs(now);
+  const uint8_t m = (uint8_t)control.mode();
+  if (!fram.present()) { telem::emitMsg(now, "fram: ABSENT (FM24CL16B not found at boot)"); return; }
+  if (a == nullptr || strcmp(a, "?") == 0) {
+    const fl::Header &h = framlog.header();
+    char b[64];
+    snprintf(b, sizeof(b), "fram: %s boot %u fl %u ev %u tr %u err %lu",
+             framlog.recording() ? "REC" : "idle", (unsigned)h.boot_count, (unsigned)h.flight,
+             (unsigned)h.evt_n, (unsigned)framlog.trajCount(), (unsigned long)fram.errors());
+    telem::emitMsg(now, b);
+    return;
+  }
+  if (strcmp(a, "start") == 0) {
+    if (m == ctl::CM_ACTIVE) { telem::emitMsg(now, "fram: refused in ACTIVE (would wipe this flight)"); return; }
+    if (fb_dump_stage_ != 0) { telem::emitMsg(now, "fram: busy dumping"); return; }
+    fb_inflight_ = false;
+    fb_init_ = true;
+    framlog.start(ms, m);
+    telem::emitMsg(now, "fram: RECORDING - previous recording wiped");
+    return;
+  }
+  if (strcmp(a, "stop") == 0) {
+    if (!framlog.recording()) { telem::emitMsg(now, "fram: not recording"); return; }
+    fbFlightEnd(ms, m, false);
+    framlog.stop(ms, m);
+    telem::emitMsg(now, "fram: stopped - $fram dump to read it out");
+    return;
+  }
+  if (strcmp(a, "dump") == 0 || strcmp(a, "raw") == 0) {
+    if (cmd_from_lora_) { telem::emitMsg(now, "fram: dump is USB only ($fram flight over LoRa)"); return; }
+    if (fb_dump_stage_ != 0) { telem::emitMsg(now, "fram: busy dumping"); return; }
+    fb_dump_stage_ = (a[0] == 'r') ? 5 : 1;
+    fb_dump_i_ = 0;
+    telem::emitMsg(now, a[0] == 'r' ? "fram: raw dump" : "fram: dumping");
+    return;
+  }
+  if (strcmp(a, "flight") == 0) {
+    fl::Summary sm;
+    if (!framlog.readSummary(0, &sm)) { telem::emitMsg(now, "fram: no flight summary yet"); return; }
+    char b[64];
+    snprintf(b, sizeof(b), "fram f%u: apo %ldm t+%lus max %ld.%ldg %ldm/s",
+             (unsigned)sm.flight, lroundf(sm.apogee_m), (unsigned long)((sm.apogee_ms - sm.launch_ms) / 1000ul),
+             lroundf(sm.max_a_g * 10.0f) / 10, lroundf(sm.max_a_g * 10.0f) % 10, lroundf(sm.max_spd_mps));
+    telem::emitMsg(now, b);
+    snprintf(b, sizeof(b), "fram f%u: safe %u t+%lus land t+%lus tilt %ld",
+             (unsigned)sm.flight, (unsigned)sm.safe_reason, (unsigned long)((sm.safe_ms - sm.launch_ms) / 1000ul),
+             (unsigned long)(sm.dur_ms / 1000ul), lroundf(sm.max_tilt_deg));
+    telem::emitMsg(now, b);
+    snprintf(b, sizeof(b), "fram f%u: %.6f,%.6f alt %ldm", (unsigned)sm.flight, sm.lat_deg, sm.lon_deg, lroundf(sm.alt_msl_m));
+    telem::emitMsg(now, b);
+    return;
+  }
+  if (strcmp(a, "mark") == 0) {
+    const char *v = strtok_r(nullptr, " ", &fb_cmd_save_);
+    int16_t nmk = (int16_t)(v ? atoi(v) : 0);
+    if (!framlog.recording()) { telem::emitMsg(now, "fram: not recording - mark dropped"); return; }
+    framlog.event(ms, m, fl::EV_MARK, nmk, 0);
+    char b[48];
+    snprintf(b, sizeof(b), "fram: mark %d", (int)nmk);
+    telem::emitMsg(now, b);
+    return;
+  }
+  if (strcmp(a, "test") == 0) {
+    if (fb_dump_stage_ != 0) { telem::emitMsg(now, "fram: busy dumping"); return; }
+    telem::emitMsg(now, framlog.scratchTest() ? "fram: test OK (write/read on the spare bytes)"
+                                              : "fram: test FAILED");
+    return;
+  }
+  telem::emitMsg(now, "fram: start|stop|dump|raw|flight|mark n|test|?");
+}
+
 static void execCommand(char *line) {
   const uint64_t now = monoNow();
   char *save = nullptr;
@@ -589,6 +957,12 @@ static void execCommand(char *line) {
   if (cmd == nullptr) { telem::emitMsg(now, "cmd: unknown"); return; }
   if (strcmp(cmd, "ping") == 0) {
     telem::emitMsg(now, "cmd: pong");
+    return;
+  }
+  if (strcmp(cmd, "fram") == 0 || strcmp(cmd, "fram?") == 0) {
+    fb_cmd_save_ = save;
+    const char *a = (strcmp(cmd, "fram?") == 0) ? nullptr : strtok_r(nullptr, " ", &fb_cmd_save_);
+    framCommand(now, a);
     return;
   }
   if (strcmp(cmd, "cal") == 0) {
@@ -757,6 +1131,7 @@ static void execCommand(char *line) {
       telem::emitMsg(now, "lcal: saving to flash - board freezes ~2 s");
       TELEM_SERIAL.flush();
       bool ok = cfgstore::saveLinkage(all);
+      framlog.event(nowMs(now), (uint8_t)control.mode(), ok ? fl::EV_CFG_SAVED : fl::EV_CFG_FAIL, 2, 0);
       servos.setLinkage(all);
       applyAuthority();
       telem::emitMsg(now, ok ? "lcal: cleared to defaults"
@@ -948,6 +1323,7 @@ static void execCommand(char *line) {
       telem::emitMsg(now, "lcal: saving to flash - board freezes ~2 s");
       TELEM_SERIAL.flush();
       bool ok = cfgstore::saveLinkage(all);
+      framlog.event(nowMs(now), (uint8_t)control.mode(), ok ? fl::EV_CFG_SAVED : fl::EV_CFG_FAIL, 2, 0);
       // The measured table is APPLIED to the servos either way, so the
       // CAL/default flag must follow the live table, not the flash write:
       // after a failed save the reply says "RAM only" and $lcal flash shows
@@ -1277,10 +1653,12 @@ static void execCommand(char *line) {
     if (strcmp(cmd, "lora") == 0 && a != nullptr) {
       if (strcmp(a, "rec") == 0 || strcmp(a, "flight") == 0) {
         bool rec = a[0] == 'r';
-        link::setProfile(rec ? lc::kProfRecovery : lc::kProfFlight, now);
-        link_prof_seen_ = link::profile();
-        telem::emitMsg(now, rec ? "lora: RECOVERY profile SF11/125k beacon 10 s"
-                                : "lora: FLIGHT profile SF7/500k 4 Hz");
+        // The switch is deferred until this acknowledgement has left on
+        // the CURRENT profile, so the base station sees it.
+        link::requestProfile(rec ? lc::kProfRecovery : lc::kProfFlight, now,
+                             true);
+        telem::emitMsg(now, rec ? "lora: RECOVERY requested SF11/125k beacon 10 s"
+                                : "lora: FLIGHT requested SF7/500k 4 Hz");
         return;
       }
       link::setMute(a[0] == '0');
@@ -1423,8 +1801,8 @@ static void fillLinkState(lc::StateFields *f) {
 }
 
 // 10 Hz: the LoRa MAC's profile hooks. "Landed" = control SAFE with the
-// IMU still (|gyro| < 3 dps, | |a| - g | < 1 m/s^2) for 30 s; "flight lock"
-// = ACTIVE, the one phase in which the link must never re-tune. Every
+// IMU still (|gyro| < 3 dps, | |a| - g | < 1 m/s^2) for 30 s (the MAC acts
+// on its rising edge); "flight lock" = any armed mode. Every applied
 // profile change (command or self-directed) is reported as a msg.
 static void linkService(uint64_t now) {
   const float *g = sensors.lastGyro();
@@ -1437,13 +1815,20 @@ static void linkService(uint64_t now) {
   bool landed = control.mode() == ctl::CM_SAFE && still_since_us_ != 0 &&
                 (now - still_since_us_) >= 30000000ull;
   link::noteLanded(landed);
-  link::setFlightLock(control.mode() == ctl::CM_ACTIVE);
-  uint8_t p = link::profile();
-  if (p != link_prof_seen_) {
-    link_prof_seen_ = p;
+  // No self-directed switch while armed in any way (ARMED on the pad,
+  // ACTIVE in boost/coast, BENCH on the ground test); arming returns the
+  // link to FLIGHT unless the operator pinned RECOVERY.
+  uint8_t m = (uint8_t)control.mode();
+  link::setFlightLock(m == ctl::CM_ARMED || m == ctl::CM_ACTIVE ||
+                      m == ctl::CM_BENCH);
+  if (m == ctl::CM_ARMED && ctl_mode_seen_ != ctl::CM_ARMED) link::noteArmed(now);
+  ctl_mode_seen_ = m;
+  uint8_t p;
+  if (link::takeProfileChange(&p)) {
+    framlog.event(nowMs(now), m, fl::EV_LORA_PROFILE, p, 0);
     telem::emitMsg(now, p == lc::kProfRecovery
-                            ? "lora: -> RECOVERY profile SF11/125k beacon 10 s"
-                            : "lora: -> FLIGHT profile SF7/500k 4 Hz");
+                            ? "lora: now RECOVERY profile SF11/125k beacon 10 s"
+                            : "lora: now FLIGHT profile SF7/500k 4 Hz");
   }
 }
 
@@ -1473,6 +1858,26 @@ void setup() {
   }
   link::begin(&lora, fillLinkState);
   link::setMute(LORA_TX_AT_BOOT == 0);
+
+  // FRAM black box: probe, load the header, and if a recording was in
+  // progress across this reset, log the boot with its cause (RCC->CSR).
+  fram.begin(&Wire);
+  {
+    fl::Store st = { fbStoreRead, fbStoreWrite, nullptr };
+    framlog.begin(st);
+    uint32_t csr = RCC->CSR;
+    uint8_t cause = 0;
+    if (csr & RCC_CSR_PINRSTF) cause |= 0x01;
+    if (csr & RCC_CSR_PORRSTF) cause |= 0x02;
+    if (csr & RCC_CSR_BORRSTF) cause |= 0x04;
+    if (csr & RCC_CSR_SFTRSTF) cause |= 0x08;
+    if (csr & RCC_CSR_IWDGRSTF) cause |= 0x10;
+    if (csr & RCC_CSR_WWDGRSTF) cause |= 0x20;
+    if (csr & RCC_CSR_LPWRRSTF) cause |= 0x40;
+    RCC->CSR |= RCC_CSR_RMVF;
+    fb_reset_cause_ = cause;
+    framlog.onBoot(nowMs(now), cause);
+  }
 
   ServoConfig svc;
   svc.addr = SERVO_PCA_ADDR;
@@ -1569,6 +1974,15 @@ void setup() {
                                  ? "lora SX1278 (SPI1): OK - tx muted "
                                    "($lora 1 to transmit; antenna first)"
                                  : "lora SX1278 (SPI1): OK - transmitting"));
+  {
+    char fb[96];
+    snprintf(fb, sizeof(fb), "fram FM24CL16B @0x50: %s (reset 0x%02x)",
+             !fram.present() ? "NOT FOUND"
+             : framlog.recording() ? "OK - RECORDING (resumed across reset)"
+                                   : "OK - idle, $fram start to record",
+             (unsigned)fb_reset_cause_);
+    telem::emitMsg(bus, fb);
+  }
   telem::emitMsg(bus, servos.present() ? "pwm PCA9685 @0x40: OK"
                                        : "pwm PCA9685 @0x40: NOT FOUND");
   {
@@ -1637,6 +2051,7 @@ static void processFixes(uint64_t now) {
         if (!origin_emitted_ && filter.state() == eskf::FS_RUN) {
           emitOriginRecord(now);
           origin_emitted_ = true;
+          framlog.event(nowMs(now), (uint8_t)control.mode(), fl::EV_ORIGIN, 0, 0);
         }
       }
       continue;
@@ -1836,6 +2251,9 @@ static void orchestrate(uint64_t now) {
                  filter.magInitUsed() ? "mag" : "no mag - arbitrary");
         telem::emitMsg(now, abuf);
       }
+      framlog.event(nowMs(now), (uint8_t)control.mode(),
+                    c.alq ? fl::EV_ALIGN_DONE : fl::EV_ALIGN_DEGRADED, 0,
+                    (int32_t)lroundf(c.eul_deg[2] * 100.0f));
       if (kMagMode != eskf::MAG_OFF && sensors.magHealth().present &&
           !filter.magInitUsed()) {
         telem::emitMsg(now,
@@ -1884,7 +2302,9 @@ void loop() {
   {
     char lbuf[64];
     if (link::popCommand(lbuf, sizeof(lbuf)) && lbuf[0] == '$') {
+      cmd_from_lora_ = true;
       execCommand(lbuf);
+      cmd_from_lora_ = false;
     }
   }
 
@@ -1906,9 +2326,10 @@ void loop() {
       // dt is the sample interval (fresh samples arrive at the sensor ODR),
       // not the poll interval - 1/440 here made every integrator and slew
       // step run 10% slow.
-      control.tick(1.0f / (float)IMU_ODR_HZ,
-                   (s.gyro[0] - filter.gyroBias()[0]) * nav::RAD2DEG,
-                   e[0] * nav::RAD2DEG, acosf(cx) * nav::RAD2DEG,
+      last_tilt_deg_ = acosf(cx) * nav::RAD2DEG;
+      last_rollrate_dps_ = (s.gyro[0] - filter.gyroBias()[0]) * nav::RAD2DEG;
+      control.tick(1.0f / (float)IMU_ODR_HZ, last_rollrate_dps_,
+                   e[0] * nav::RAD2DEG, last_tilt_deg_,
                    s.accel[0] / 9.80665f, filter.vel()[2],
                    sensors.imuHealth().fresh);
       if (control.mode() == ctl::CM_ACTIVE || control.mode() == ctl::CM_BENCH ||
@@ -1930,12 +2351,20 @@ void loop() {
       if (now > next_telem_ + 10ull * TELEM_PERIOD_US) {
         next_telem_ = now + TELEM_PERIOD_US;
       }
-      buildStateRecord(now);
+      if (fb_dump_stage_ != 0) {
+        // Dumping: two black-box lines per slot instead of a state record,
+        // so a dump finishes in about a second and the ring never drops it.
+        fbDumpStep(now);
+        if (fb_dump_stage_ != 0) fbDumpStep(now);
+      } else {
+        buildStateRecord(now);
+      }
     } else if (now >= next_service_ && slack > COST_SERVICE_US) {
       next_service_ = now + SERVICE_PERIOD_US;
       sensors.service(now);
       orchestrate(now);
       linkService(now);
+      blackboxService(now);
       ledsService();
       // PCA9685 recovery: a failed boot probe (slow power-up, bus glitch)
       // or a $sframe sequence that died mid-flight marks the chip absent;
@@ -2006,10 +2435,16 @@ void loop() {
         telem::emitMsg(now, "magcal: saving to flash - board freezes ~2 s");
         TELEM_SERIAL.flush();
         bool saved = cfgstore::saveMagHard(hi);
+        framlog.event(nowMs(now), (uint8_t)control.mode(), saved ? fl::EV_CFG_SAVED : fl::EV_CFG_FAIL, 1, 0);
         telem::emitMsg(now, saved
                                 ? "magcal: saved to flash; send $cal to re-align"
                                 : "magcal: flash save FAILED (RAM only until reboot)");
       }
+    } else if (now >= next_fram_ && slack > COST_FRAM_US && !framlog.idle()) {
+      // One <=28 B FRAM write. Claims a gap only when the queue holds
+      // something, so an idle black box costs the scheduler nothing.
+      next_fram_ = now + FRAM_POLL_US;
+      framSlot(now);
     } else if (now >= next_radio_ && slack > COST_RADIO_US) {
       next_radio_ = now + RADIO_POLL_US;
       link::service(now);

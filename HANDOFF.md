@@ -217,6 +217,9 @@ RocketNav/
     pca9685.h/.cpp      owned PWM driver
     servos.h/.cpp       canard mapping, bench modes, write-on-change scheduler
     control.h/.cpp      roll controller + arming/phase machine (pure)
+    fm24cl16b.h/.cpp    owned FRAM driver (I2C1 @0x50-57, page in the address)
+    framlog.h/.cpp      FRAM black box: layout, record codecs, write queue,
+                        opt-in recording (pure, host-tested)
     sx1278.h/.cpp       owned LoRa driver (portable stm32duino/ESP32)
     linkcodec.h/.cpp    LoRa air codec + CRC (pure)
     link.h/.cpp         rocket-side LoRa MAC
@@ -335,6 +338,25 @@ to recovery → rocket moved itself to RECOVERY ~20 s after its last
 keepalive → base decoded its beacons), the base's scan (found a rocket that
 came back on FLIGHT), and `$lora flight` over SF11. Still owed from PLAN
 §6: the walk test and the ground test (the only ones that need distance).
+**Review round 2026-09-23** (`/code-review high` on firmware + base, 11
+findings, all fixed): landed is edge-triggered (`$lora flight` after
+landing sticks); flight lock covers ARMED/ACTIVE/BENCH; arming returns to
+FLIGHT unless `$lora rec` pinned; keepalive-lost timer 30 s; the switch is
+deferred until the ack has left on the old profile (`requestProfile` /
+`takeProfileChange`); RECOVERY messages paced 1.5 s; base follows its own
+`$lora rec|flight` uplinks 3 s later, never re-tunes while transmitting
+(`scheduleListen`), keepalives cue-only on RECOVERY, scan dwell 13 s, first
+boot keeps both command copies on FLIGHT, every msg text scrubbed; driver
+writes the SX127x errata registers per bandwidth; codec profiles are
+constexpr with static_asserts against the macros and one CRC seal/check.
+Bench-verified the same day with both new builds: `$lora rec` ack heard
+on SF7 0.45 s after the uplink, base followed in 3.5 s, beacons with a
+live GPS fix, pong on SF11, `$lora flight` ack heard on SF11, base
+followed with no pin, 64 flight frames after; lost-base rule fired ~30 s
+after the last keepalive and the base re-acquired on recovery. Note for
+the bench: muting the rocket makes the base drift to RECOVERY after 10 s
+and then scan - Unmute still gets through because the repeat goes out on
+the other profile.
 Rocket is TX-master every 250 ms (54-byte binary `T` state frame; `M` text
 frames alternate slots from a 4-deep msg queue); base listens-after-talk and
 sends `C` uplink command frames (twice; rocket dedupes by seq). **The uplink
@@ -360,6 +382,39 @@ regs` shows the DIO0 level next to the raw flag register. The base
 station translates everything to the same NDJSON the viewer speaks and stamps
 `hdr.mode:"lora"`. Viewer topbar has a USB|LoRa selector; LoRa display is
 4 Hz by design — judge responsiveness over USB.
+
+### 5.6b FRAM black box (2026-09-23, framlog.h is the spec)
+FM24CL16B on I2C1 (0x50–0x57, page bits in the device address, WP low).
+**Opt-in by the owner's explicit rule:** nothing is written until
+`$fram start` (viewer Log tab "Record", two clicks; USB or LoRa), which
+also wipes the previous recording; `$fram stop` ends it; errors before
+Start are not logged anywhere. The recording flag lives in the header, so
+a reset mid-flight resumes and logs BOOT with the RCC->CSR cause and the
+last phase the 1 Hz heartbeat saw. Layout in framlog.h (32 B header,
+256 B reserved config mirror - NOT wired yet, 32×16 B events, 2×64 B
+summaries, 21+24 ×24 B trajectory, 8 B scratch), every record CRC-8,
+header written after the record it points at. Writes go through a
+16-item queue drained one ≤28 B chunk per call from the `fram` scheduler
+slot (COST 800 µs, sits after service and before radio, claims a gap only
+while the queue is non-empty) - never in the IMU branch. **The dump does
+NOT use that slot:** the secondary chain is oversubscribed (radio 250 Hz +
+gnss/mag 100 Hz + …) and a last-in-chain slot starves; the first bench
+dump took 4 s and dropped lines. `fbDumpStep` runs inside the telemetry
+slot instead, two lines per 20 ms with the state record paused, so a dump
+takes ~1 s and the viewer sees a short st gap. Sensor-fault events are
+debounced 0.5 s (the baro's fresh flag flickers ~100 ms once a second). Hooks live in
+`blackboxService()` (10 Hz): control-mode edges, sensor fault edges, bus
+resets, PCA, GPS fix/lost, LoRa profile/base-lost, plus align/origin/cfg
+hooks at their sources; trajectory 2 Hz through the 21-record launch
+segment, then 0.25 Hz until landed (SAFE + still 30 s), 0.5 Hz on BENCH;
+maxima → summary at landing or `$fram stop`. `$fram dump|raw` stream
+`fram` NDJSON records one per slot through `telem::emitRaw()`; USB only
+(`cmd_from_lora_` gates it); `$fram flight` is the LoRa-sized summary.
+Viewer: Log tab, parse-core `fram` kind (parse_test 44), exports .csv /
+.json / .hex. control gained `safeReason()` (1 imu 2 tilt 3 descent
+4 timeout). Host test `framlog_test` (28). **Bench-verified: not yet** -
+first checks after the reflash: `$fram test`, `$fram start`, `$rst` →
+BOOT with cause 0x08, a BENCH roll test → trajectory, `$fram dump`.
 
 ### 5.7 Telemetry records (SCHEMA.md is authoritative)
 NDJSON, 50 Hz `st` records (~1.25 kB each, ~62 kB/s of the 92 kB/s link),
@@ -500,8 +555,9 @@ refused unless IDLE or SAFE.
 
 | Check | Result |
 |---|---|
-| firmware | 147,276 B flash, 20,120 B RAM |
-| base station (esp32c3, CDCOnBoot=cdc) | 309,044 B flash, 14,680 B RAM |
+| firmware | 157,492 B flash, 21,608 B RAM |
+| base station (esp32c3, CDCOnBoot=cdc) | 309,660 B flash, 14,680 B RAM |
+| framlog_test | 28/28 |
 | eskf_test | 91/91 |
 | magfit_test | 10/10 |
 | link_test | 20/20 |

@@ -263,7 +263,14 @@ should carry). In ITU Region 1 the 433 MHz SRD band caps at 10 mW e.r.p. and
 - Viewer: profile badge, Recovery/Flight buttons, up-rssi badge, BEACON
   downlink state, stale threshold from `hdr.ohz` (30 s in recovery).
 - Not built: +20 dBm (rejected), CR 4/8, callsign field (still reserved).
-- Tests still owed: section 6 in full. Nothing here has been on the air.
+- On the air 2026-09-21/23 (bench): RF-commanded switches both ways, base
+  follow and scan, beacons at SF11, ping on SF11, keepalive-loss rule. A
+  code review on 2026-09-23 then hardened the rules: landed is an edge,
+  armed modes lock the profile, arming returns to FLIGHT, the ack leaves
+  before the re-tune, the base follows `$lora` commands directly and never
+  re-tunes mid-packet, recovery keepalives are cue-only, scan dwell 13 s,
+  and the driver applies the SX127x errata registers (a few dB at 500 kHz).
+- Tests still owed: section 6 walk test and ground test.
 
 ## 8. Bottom line
 

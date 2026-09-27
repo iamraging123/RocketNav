@@ -91,6 +91,15 @@
      velocity, so those hide while the stream is the recovery profile. */
   body.recovery .fo { display: none !important; }
   #histSlider { flex: 0 0 150px; min-width: 150px; }
+  .fbnote { font-size: 11px; color: var(--dim); margin-top: 6px; line-height: 1.45; }
+  #chFbAlt { height: 170px; }
+  #pg-log .charts { grid-template-columns: 1fr; }
+  #fbEvtWrap { max-height: 380px; overflow: auto; }
+  #fbEvtWrap td.bad { color: var(--bad); }
+  .fbcards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 6px; }
+  .fbcard { background: var(--panel2); border: 1px solid var(--edge); padding: 5px 8px; }
+  .fbcard .l { font-size: 9px; text-transform: uppercase; color: var(--dim); letter-spacing: .06em; }
+  .fbcard .v { font-family: var(--mono); font-size: 13px; }
   #loraBar { display: none; }
   #loraBar.on { display: flex; }
   .badge.bad, .badge.bad b { color: var(--bad); border-color: var(--bad); }
@@ -376,6 +385,7 @@
       <span class="spacer"></span>
       <button class="tab" data-page="ctrl">Ctrl</button>
       <button class="tab" data-page="comms">Comms</button>
+      <button class="tab" data-page="log">Log</button>
     </nav>
 
     <section class="page on" id="pg-main">
@@ -589,6 +599,33 @@
         </div>
       </div>
     </section>
+
+    <section class="page" id="pg-log">
+      <div class="duo">
+        <div class="panel">
+          <h2>Black box (FRAM)</h2>
+          <div class="ctlrow"><button id="fbRecord" class="secondary armred" title="$fram start &mdash; WIPES the previous recording and starts a new one. Two clicks within 5 s.">Record</button><button id="fbStop" class="secondary" title="$fram stop &mdash; closes the flight summary and stops writing">Stop</button><button id="fbStatus" class="secondary mini" title="$fram?">Status</button><button id="fbFlight" class="secondary mini" title="$fram flight &mdash; last flight summary as three lines; works over LoRa">Last flight</button><button id="fbMark" class="secondary mini" title="$fram mark n &mdash; a user marker event">Mark</button><input type="number" id="fbMarkN" value="1" min="0" max="999" style="width:64px"></div>
+          <div class="ctlrow uo"><button id="fbDump" class="secondary" title="$fram dump &mdash; read everything out over USB">Dump</button><button id="fbRaw" class="secondary mini" title="$fram raw &mdash; all 2048 bytes as hex">Raw</button><button id="fbTest" class="secondary mini" title="$fram test &mdash; write/read pattern on the spare bytes">Test</button><span class="sp"></span><button id="fbCsv" class="secondary mini" disabled>Save events .csv</button><button id="fbJson" class="secondary mini" disabled>Save .json</button><button id="fbHex" class="secondary mini" disabled>Save .hex</button></div>
+          <table>
+            <tr><td class="k">recording</td><td id="fbState" class="r">&mdash;</td></tr>
+            <tr><td class="k">boots / flights</td><td id="fbBoots" class="r">&mdash;</td></tr>
+            <tr><td class="k">events / trajectory</td><td id="fbCounts" class="r">&mdash;</td></tr>
+            <tr><td class="k">last reset</td><td id="fbReset" class="r">&mdash;</td></tr>
+            <tr><td class="k">dump</td><td id="fbDumpState" class="r">&mdash;</td></tr>
+          </table>
+          <div class="fbnote">Nothing is written until Record. Record wipes the previous recording. A reset mid-flight resumes and logs the cause. Stop closes the summary. Dump is USB only; Last flight works over LoRa.</div>
+        </div>
+        <div class="panel">
+          <h2>Flight summary</h2>
+          <div id="fbSum" class="fbcards"><div class="fbcard"><div class="l">latest</div><div class="v">&mdash;</div></div></div>
+        </div>
+      </div>
+      <div class="charts"><canvas class="chart" id="chFbAlt"></canvas></div>
+      <div class="panel">
+        <h2>Events</h2>
+        <div id="fbEvtWrap"><table id="fbEvtTable"><thead><tr><th>t+</th><th>fl</th><th>phase</th><th>event</th><th>detail</th></tr></thead><tbody id="fbEvtBody"><tr><td colspan="5" style="color:var(--dim)">no dump yet</td></tr></tbody></table></div>
+      </div>
+    </section>
   </div>
 </div>
 
@@ -601,7 +638,8 @@
 
 /* Classify one serial line. Returns {kind, rec?}:
    kind = "empty" | "error" (unparseable / wrong shape) | "hdr" | "org" |
-          "st" | "unknown" (valid JSON, unrecognized t). */
+          "st" | "fram" (black-box dump record, r.k names the part) |
+          "unknown" (valid JSON, unrecognized t). */
 function parseLine(line) {
   const s = line.trim();
   if (!s) return { kind: "empty" };
@@ -622,6 +660,10 @@ function parseLine(line) {
   }
   if (r.t === "cal") return { kind: "cal", rec: r };
   if (r.t === "lcal") return { kind: "lcal", rec: r };
+  if (r.t === "fram") {
+    if (typeof r.k !== "string") return { kind: "error" };
+    return { kind: "fram", rec: r };
+  }
   return { kind: "unknown", rec: r };
 }
 
@@ -724,6 +766,8 @@ const S = {
   byteWin: [],                       // {w, b} rolling window for throughput
   lastRxWall: 0,
   pingSentAt: 0, pingRtt: null,      // $ping round trip (ms), any link
+  fram: { hdr: null, evt: [], trj: [], sum: [], raw: [], dumping: false, statusTxt: null },
+  framDirty: true,
 };
 
 function resetSession() {
@@ -1506,6 +1550,7 @@ function handleLine(line) {
   if (p.kind === "msg") {
     S.msgs.push(p.rec);
     if (p.rec.txt) logCmd("< " + p.rec.txt);
+    if (/^fram: /.test(p.rec.txt || "")) { S.fram.statusTxt = p.rec.txt; S.framDirty = true; }
     if (p.rec.txt === "cmd: pong" && S.pingSentAt) {
       S.pingRtt = performance.now() - S.pingSentAt;  // LoRa: base->rocket->base
       S.pingSentAt = 0;
@@ -1515,6 +1560,17 @@ function handleLine(line) {
     return;
   }
   if (p.kind === "cal") { S.cal = p.rec; S.bootDirty = true; return; }
+  if (p.kind === "fram") {
+    const q = p.rec, F = S.fram;
+    if (q.k === "hdr") { F.hdr = q; F.evt = []; F.trj = []; F.sum = []; F.dumping = true; }
+    else if (q.k === "evt") F.evt.push(q);
+    else if (q.k === "trj") F.trj.push(q);
+    else if (q.k === "sum") F.sum.push(q);
+    else if (q.k === "raw") { if (q.a === 0) F.raw = []; F.raw.push(q); F.dumping = true; }
+    else if (q.k === "end") F.dumping = false;
+    S.framDirty = true;
+    return;
+  }
   if (p.kind === "lcal") {
     const q = p.rec;
     if (q.src === 2) S.lcal.stage = (q.fin >= 0) ? q : null;
@@ -1688,6 +1744,10 @@ function loraStreamNow() {
 
 function updateDom() {
   const r = S.paused ? S.view : S.last;
+  // Black-box tab first: it has no dependence on a live state record and
+  // updateDom returns early below when none has arrived yet.
+  if (S.framDirty) { S.framDirty = false; renderFram(); }
+  if ($("chFbAlt").offsetParent !== null) drawFbAlt();
 
   const active = S.connected || S.sim;
   const age = (active && S.lastRxWall) ? (performance.now() - S.lastRxWall) / 1000 : null;
@@ -1966,6 +2026,107 @@ function updateDom() {
     S.consoleDirty = false;
     pinLog($("console"), S.consoleLines.join("\n"));
   }
+}
+
+/* ================= black box (FRAM) tab ================= */
+const FB_EV = { 1: "BOOT", 2: "REC START", 3: "ALIGN DONE", 4: "ALIGN DEGRADED", 5: "GPS FIX",
+  6: "GPS LOST", 7: "ORIGIN", 16: "ARM", 17: "DISARM", 18: "LAUNCH", 19: "APOGEE", 20: "SAFE",
+  21: "LANDED", 22: "BENCH", 32: "SENSOR FAULT", 33: "SENSOR OK", 34: "I2C BUS RESET",
+  35: "PCA ABSENT", 36: "PCA OK", 48: "LORA PROFILE", 49: "LORA BASE LOST", 64: "CFG SAVED",
+  65: "CFG FAIL", 126: "REC STOP", 127: "MARK" };
+const FB_BAD = new Set([4, 6, 32, 34, 35, 49, 65]);
+const FB_PHASE = ["idle", "ARMED", "ACTIVE", "SAFE", "BENCH"];
+const FB_SAFE = ["", "IMU stale", "tilt", "descending", "timeout"];
+const FB_SENSOR = ["imu", "mag", "baro", "gnss"];
+function fbResetName(c) {
+  const b = [];
+  if (c & 1) b.push("pin"); if (c & 2) b.push("power-on"); if (c & 4) b.push("brownout");
+  if (c & 8) b.push("software"); if (c & 16) b.push("IWDG"); if (c & 32) b.push("WWDG"); if (c & 64) b.push("low-power");
+  return b.length ? b.join("+") : "none";
+}
+function fbDetail(e) {
+  switch (e.code) {
+    case 1: return `reset ${fbResetName(e.arg & 0xFF)} · was ${FB_PHASE[(e.arg >> 8) & 0xFF] || "?"} at t+${(e.aux / 1000).toFixed(1)} s`;
+    case 3: case 4: return `heading ${(e.aux / 100).toFixed(1)}°`;
+    case 5: return `${e.arg} sats · hAcc ${(e.aux / 10).toFixed(1)} m`;
+    case 18: return `|a| ${(e.aux / 100).toFixed(2)} g`;
+    case 19: case 21: return `AGL ${(e.aux / 10).toFixed(1)} m`;
+    case 20: return FB_SAFE[e.arg] || `reason ${e.arg}`;
+    case 22: return e.arg ? "start" : "stop";
+    case 32: case 33: return `${FB_SENSOR[e.arg] || e.arg} · bits ${e.aux}`;
+    case 34: return `count ${e.aux}`;
+    case 48: return e.arg ? "RECOVERY" : "FLIGHT";
+    case 64: case 65: return e.arg === 1 ? "mag hard-iron" : "linkage tables";
+    case 127: return `#${e.arg}`;
+    default: return e.arg || e.aux ? `arg ${e.arg} aux ${e.aux}` : "";
+  }
+}
+function renderFram() {
+  const F = S.fram, h = F.hdr;
+  const esc = t => String(t).replace(/[&<>]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
+  if (h) {
+    T("fbState", h.rec ? "RECORDING" : "stopped");
+    T("fbBoots", `${h.boot} / ${h.fl}`);
+    T("fbCounts", `${h.evn} / ${h.trn}${h.werr ? ` · ${h.werr} write errors` : ""}`);
+    T("fbReset", `${fbResetName(h.cause)} · last phase ${FB_PHASE[h.lp] || h.lp} at t+${(h.hb / 1000).toFixed(1)} s`);
+  } else if (F.statusTxt) {
+    T("fbState", F.statusTxt.replace(/^fram: /, ""));
+  }
+  $("fbState").className = "r" + (h && h.rec ? " bad" : "");
+  T("fbDumpState", F.dumping ? "receiving…" : (h ? `${F.evt.length} events · ${F.trj.length} points · ${F.sum.length} summaries` : (F.raw.length ? `${F.raw.length} raw lines` : "—")));
+  $("fbCsv").disabled = F.evt.length === 0;
+  $("fbJson").disabled = !h;
+  $("fbHex").disabled = F.raw.length === 0;
+  const tb = $("fbEvtBody");
+  if (F.evt.length) {
+    const t0 = F.evt[0].ms;
+    tb.innerHTML = F.evt.map(e => `<tr><td class="m">${((e.ms - t0) / 1000).toFixed(1)} s</td><td>${e.fl}</td><td>${FB_PHASE[e.ph] || e.ph}</td><td${FB_BAD.has(e.code) ? ' class="bad"' : ""}>${FB_EV[e.code] || "0x" + e.code.toString(16)}</td><td>${esc(fbDetail(e))}</td></tr>`).join("");
+  }
+  const sums = F.sum.filter(x => x && x.fl !== undefined);
+  if (sums.length) {
+    const card = (l, v) => `<div class="fbcard"><div class="l">${l}</div><div class="v">${v}</div></div>`;
+    $("fbSum").innerHTML = sums.map(x => [
+      card(x.slot === 0 ? "latest · flight " + x.fl : "previous · flight " + x.fl, `launch t+${(x.launch / 1000).toFixed(1)} s`),
+      card("apogee", `${x.apo.toFixed(1)} m at +${((x.apoms - x.launch) / 1000).toFixed(1)} s`),
+      card("max |a| · speed", `${x.maxa.toFixed(1)} g · ${x.maxspd.toFixed(1)} m/s`),
+      card("max roll rate · tilt · canard", `${x.maxrr.toFixed(0)} °/s · ${x.maxtilt.toFixed(0)}° · ${x.maxcdef.toFixed(2)}°`),
+      card("safe", `${FB_SAFE[x.safe] || x.safe} at +${((x.safems - x.launch) / 1000).toFixed(1)} s`),
+      card("landed", `+${(x.dur / 1000).toFixed(1)} s · ${x.lat ? x.lat.toFixed(6) + ", " + x.lon.toFixed(6) + " · " + x.alt.toFixed(0) + " m" : "no fix"}`),
+      card("uplink · boot", `min rssi ${x.urssi || "—"} dBm · boot ${x.boot}`),
+    ].join("")).join("");
+  }
+}
+function drawFbAlt() {
+  const c = $("chFbAlt");
+  const g = fitCanvas(c);
+  const dpr = window.devicePixelRatio || 1;
+  const W = c.width, H = c.height;
+  g.clearRect(0, 0, W, H);
+  g.font = `${10.5 * dpr}px Consolas, monospace`;
+  g.fillStyle = PAL.dim;
+  g.fillText("black box · altitude AGL m (red) · vertical speed m/s (blue)", 6 * dpr, 12 * dpr);
+  const pts = S.fram.trj;
+  if (pts.length < 2) { g.fillText("no trajectory points", 6 * dpr, 28 * dpr); return; }
+  const padL = 42 * dpr, padT = 18 * dpr, padB = 14 * dpr, padR = 6 * dpr;
+  const t0 = pts[0].ms, t1 = pts[pts.length - 1].ms;
+  let lo = Infinity, hi = -Infinity;
+  for (const p of pts) { lo = Math.min(lo, p.ral, p.vd); hi = Math.max(hi, p.ral, p.vd); }
+  if (!(hi > lo)) { hi = lo + 1; }
+  const X = t => padL + (t - t0) / Math.max(1, t1 - t0) * (W - padL - padR);
+  const Y = v => padT + (hi - v) / (hi - lo) * (H - padT - padB);
+  g.strokeStyle = PAL.grid; g.lineWidth = dpr;
+  g.beginPath(); g.moveTo(padL, Y(0)); g.lineTo(W - padR, Y(0)); g.stroke();
+  g.fillStyle = PAL.dim;
+  g.fillText(hi.toFixed(0), 4 * dpr, padT + 4 * dpr);
+  g.fillText(lo.toFixed(0), 4 * dpr, H - padB);
+  g.fillText(`${((t1 - t0) / 1000).toFixed(0)} s`, W - padR - 30 * dpr, H - 3 * dpr);
+  const line = (key, color) => {
+    g.strokeStyle = color; g.lineWidth = 1.5 * dpr; g.beginPath();
+    pts.forEach((p, i) => { const x = X(p.ms), y = Y(p[key]); if (i) g.lineTo(x, y); else g.moveTo(x, y); });
+    g.stroke();
+  };
+  line("ral", PAL.c1);
+  line("vd", PAL.c3);
 }
 
 /* Field |B|/inclination detail (kept out of the hot path above). */
@@ -2312,7 +2473,7 @@ updateDevice();
   for (const b of tabs) b.onclick = () => show(b.dataset.page);
   let t = null;
   try { t = localStorage.getItem("rnTab"); } catch (e) {}
-  show(["main", "ctrl", "comms"].includes(t) ? t : "main");
+  show(["main", "ctrl", "comms", "log"].includes(t) ? t : "main");
 })();
 
 /* ================= ground commands ================= */
@@ -2364,6 +2525,29 @@ $("lbMute").onclick = () => sendCmd("$lora 0");
 $("lbLoraQ").onclick = () => sendCmd("$lora?");
 $("lbBaseQ").onclick = () => sendCmd("$base?");
 $("lbRec").onclick = () => sendCmd("$lora rec");
+// Record = wipe + start: two clicks within 5 s, like Arm.
+let fbArmT = 0;
+$("fbRecord").onclick = () => {
+  const now = performance.now();
+  if (now - fbArmT < 5000) { fbArmT = 0; $("fbRecord").textContent = "Record"; sendCmd("$fram start"); return; }
+  fbArmT = now; $("fbRecord").textContent = "Confirm wipe + record";
+  setTimeout(() => { if (fbArmT && performance.now() - fbArmT >= 5000) { fbArmT = 0; $("fbRecord").textContent = "Record"; } }, 5100);
+};
+$("fbStop").onclick = () => sendCmd("$fram stop");
+$("fbStatus").onclick = () => sendCmd("$fram?");
+$("fbFlight").onclick = () => sendCmd("$fram flight");
+$("fbMark").onclick = () => sendCmd("$fram mark " + (parseInt($("fbMarkN").value, 10) || 0));
+$("fbDump").onclick = () => sendCmd("$fram dump");
+$("fbRaw").onclick = () => sendCmd("$fram raw");
+$("fbTest").onclick = () => sendCmd("$fram test");
+$("fbCsv").onclick = () => {
+  const F = S.fram, t0 = F.evt.length ? F.evt[0].ms : 0;
+  const rows = [["i", "t_ms", "t_rel_s", "flight", "phase", "code", "event", "arg", "aux", "seq", "detail"]];
+  for (const e of F.evt) rows.push([e.i, e.ms, ((e.ms - t0) / 1000).toFixed(3), e.fl, FB_PHASE[e.ph] || e.ph, e.code, FB_EV[e.code] || "", e.arg, e.aux, e.seq, fbDetail(e)]);
+  download(new Blob([rows.map(r => r.map(v => /[",\n]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : v).join(",")).join("\n")], { type: "text/csv" }), "blackbox-events.csv");
+};
+$("fbJson").onclick = () => download(new Blob([JSON.stringify({ hdr: S.fram.hdr, events: S.fram.evt, trajectory: S.fram.trj, summaries: S.fram.sum }, null, 1)], { type: "application/json" }), "blackbox.json");
+$("fbHex").onclick = () => download(new Blob([S.fram.raw.map(r => r.a.toString(16).padStart(4, "0") + "  " + r.d.replace(/(..)/g, "$1 ").trim()).join("\n") + "\n"], { type: "text/plain" }), "blackbox-raw.hex");
 $("lbFlight").onclick = () => sendCmd("$lora flight");
 $("cmdCal").onclick = () => sendCmd("$cal");
 $("cmdZero").onclick = () => sendCmd("$zero");
