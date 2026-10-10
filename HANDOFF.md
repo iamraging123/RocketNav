@@ -211,7 +211,8 @@ RocketNav/
     icm45686.h/.cpp     owned IMU driver
     lis3mdl.h/.cpp      owned mag driver (+ $magdiag register probe)
     magfit.h/.cpp       least-squares sphere fit for hard iron (pure)
-    cfgcodec.h/.cpp     flash record codec v1/v2 (pure, host-tested)
+    cfgcodec.h/.cpp     flash record codec v1/v2/v3 — mag, linkage tables,
+                        fin map (pure, host-tested)
     cfgstore.h/.cpp     HAL flash I/O, sector 7 (0x08060000)
     linkage.h/.cpp      servo-µs <-> canard-deg tables (pure)
     pca9685.h/.cpp      owned PWM driver
@@ -300,6 +301,33 @@ out a wedged slave after 10 consecutive I2C errors. Health bitmask per sensor
   `applyAuthority()`, used at boot and after every linkage change.
 
 ### 5.5 Servos, linkage, persistence
+- **Canard fin map (2026-09-28).** Which PCA channel drives each canard and
+  which way it swings now live in the flash config record (cfgcodec **v3**,
+  `FinMap`), beside the linkage tables they are measured with. `$fin` sets
+  them at runtime, `$fin save` persists, `$fin reset` returns to the
+  compiled `SERVO_CH` / `SERVO_US_PER_DEG`. `Servos::setChannelMap()`
+  releases any channel it stops driving; `setUsPerDeg()` only reaches fins
+  WITHOUT a measured table, because a measured table already carries the
+  direction in its slope (`relinkAfterMapChange()` in the .ino applies that
+  rule). A duplicate channel is refused by `cfgcodec::mapSane()` at both the
+  command and the flash-load. The `fin` telemetry record (SCHEMA) feeds the
+  viewer's Canard bench diagram; it is USB-only, and the viewer shows the map
+  as unknown over LoRa rather than assuming defaults.
+- **`SERVO_DRIVE_AT_BOOT 0` (2026-09-26): the canards come up LIMP.**
+  `Servos::begin()` used to set every target to raw 1500 us and force the
+  write, so a power-up drove all four servos to center before anything was
+  commanded. After a servo or horn change 1500 us is not fin-neutral, the
+  fin travels into its linkage stop, and a digital servo holds there at
+  stall - which is how the DS290MG swap kept hitting mechanical limits at
+  every boot. Nothing emits a pulse now until a bench command or arming
+  takes ownership (`takeOwnership()` clears `off_`). Set the define to 1
+  only with a verified linkage. **Note the second half of this:** `setup()`
+  also called `servos.center()` right after loading the tables, and
+  `center()` takes ownership, which clears the limp flag `begin()` had just
+  set. That call is now gated on the same define, without which the option
+  did nothing. `$servo guard <min> <max>` narrows the pulse
+  clamp at runtime to the measured range of the fitted servos (not
+  persisted; bake the numbers into SERVO_MIN_US/MAX_US once final).
 - `SERVO_FRAME_HZ 100` (MG90S analog envelope; spec point is 50, digital-only
   range 200–333). `SERVO_WRITE_PER_FRAME 4` → writes every 2.5 ms, only on
   change ≥ ~0.9 LSB. Command→pulse worst case ≈ 15 ms electrical.
@@ -508,6 +536,15 @@ refused unless IDLE or SAFE.
   the beacon reads 0.1 Hz instead of "—". The base's "downlink quiet"
   heartbeat now uses 25 s on RECOVERY (5 s on FLIGHT) so a 10 s beacon is
   not reported as quiet.
+- **Canard bench panel (2026-09-28)** in the Ctrl tab: the fin diagram drawn
+  looking FORWARD from behind (the viewpoint in which positive roll appears
+  clockwise), fins at 12/3/6/9 for S0..S3, each drawn at its live `cdef`
+  deflection with a wedge sized by that fin's travel, a direction arrow, and
+  the map table. Selection is shared: clicking a fin, the canard-angle
+  dropdown and the linkage-cal dropdown all move together (`selectFin()`),
+  which is the point of merging them - one fin, one bench pass, from wiring
+  to angle. Identify pulses `$ang <ch>` 60/120/90. The map rows carry `uo`,
+  so they hide on the LoRa link where the `fin` record cannot arrive.
 - **PARSE-CORE contract:** the code between `PARSE-CORE-BEGIN` and
   `PARSE-CORE-END` in script block 1 is extracted verbatim by
   `parse_test.js`. Keep the markers intact. Schema growth = extend
@@ -555,16 +592,16 @@ refused unless IDLE or SAFE.
 
 | Check | Result |
 |---|---|
-| firmware | 157,492 B flash, 21,608 B RAM |
+| firmware | 160,520 B flash, 21,628 B RAM |
 | base station (esp32c3, CDCOnBoot=cdc) | 309,660 B flash, 14,680 B RAM |
 | framlog_test | 28/28 |
 | eskf_test | 91/91 |
 | magfit_test | 10/10 |
 | link_test | 20/20 |
-| cfgcodec_test | 16/16 |
+| cfgcodec_test | 24/24 |
 | control_test | 35/35 |
-| pca_test | 67/67 |
-| viewer parse_test | 41/41 |
+| pca_test | 75/75 |
+| viewer parse_test | 47/47 |
 
 If a count drops, something regressed; if it grows, you added checks.
 

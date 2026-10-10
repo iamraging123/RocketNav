@@ -16,6 +16,7 @@ static cfgcodec::Record cache_;
 static bool loaded_ = false;   // cache_ initialized (from flash or zeroed)
 static bool mag_ok_ = false;   // a stored mag record exists
 static bool lnk_ok_ = false;   // at least one stored fin is calibrated
+static bool map_ok_ = false;   // a sane stored fin map exists
 
 static void dcacheInvalidate() {
   // Flash content changed (or is about to be re-read for verification)
@@ -35,7 +36,7 @@ static void ensureLoaded() {
   dcacheInvalidate();
   uint8_t img[sizeof(cfgcodec::Record)];
   memcpy(img, (const void *)kAddr, sizeof(img));
-  cfgcodec::parse(img, &cache_, &mag_ok_, &lnk_ok_);
+  cfgcodec::parse(img, &cache_, &mag_ok_, &lnk_ok_, &map_ok_);
 }
 
 static bool eraseSector() {
@@ -106,6 +107,20 @@ bool saveLinkage(const LinkageCal lc[4]) {
   return commit();
 }
 
+bool loadFinMap(cfgcodec::FinMap *map) {
+  ensureLoaded();
+  *map = cache_.map;
+  return map_ok_;
+}
+
+bool saveFinMap(const cfgcodec::FinMap &map) {
+  ensureLoaded();
+  cache_.map = map;
+  bool ok = commit();
+  if (ok) map_ok_ = cfgcodec::mapSane(cache_.map);
+  return ok;
+}
+
 bool inspectRaw(FlashInfo *out) {
   // Non-destructive: re-read the physical sector (past the cache) and report
   // what is ACTUALLY stored - the definitive "did the last save persist?"
@@ -115,12 +130,14 @@ bool inspectRaw(FlashInfo *out) {
   memcpy(img, (const void *)kAddr, sizeof(img));
   memcpy(&out->magic, img, sizeof(out->magic));
   cfgcodec::Record r;
-  bool m = false, l = false;
-  int ver = cfgcodec::parse(img, &r, &m, &l);
+  bool m = false, l = false, mp = false;
+  int ver = cfgcodec::parse(img, &r, &m, &l, &mp);
   out->version = ver;
   out->crc_ok = (ver != 0);
   out->mag_ok = m;
   out->lnk_ok = l;
+  out->map_ok = mp;
+  out->map = r.map;
   for (int i = 0; i < 4; ++i) out->fin_n[i] = r.fin[i].n;
   memcpy(out->hard, r.hard, sizeof(out->hard));
   return ver != 0;

@@ -140,6 +140,11 @@ void emitRaw(const char *json);
 // active $lcal session (fin -1 with src 2 = no session). Arrays are n long.
 void emitLcal(uint64_t us, int8_t fin, uint8_t src, uint8_t n,
               const float deg[5], const float pus[5]);
+// Canard fin map: PCA channel and direction per canard index, which fins
+// carry a measured table, per-fin and overall authority, and whether the
+// live map matches what is stored in flash.
+void emitFin(uint64_t us, const uint8_t ch[4], const int8_t dir[4],
+             const uint8_t cal[4], const float fa[4], float auth, bool saved);
 void drain();                            // nonblocking push toward the UART
 uint32_t droppedRecords();
 

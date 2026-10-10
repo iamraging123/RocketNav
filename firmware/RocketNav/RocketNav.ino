@@ -103,8 +103,16 @@
 #define SERVO_WRITE_PER_FRAME 4  // PCA writes per PWM frame: the write latch
                                  // adds at most frame/4 on top of the frame
                                  // itself (writes still fire only on change)
-#define SERVO_MIN_US 900.0f      // absolute pulse guard
-#define SERVO_MAX_US 2100.0f
+#define SERVO_MIN_US 900.0f      // absolute pulse guard, narrow it live with
+#define SERVO_MAX_US 2100.0f     // $servo guard <min> <max>
+#define SERVO_DRIVE_AT_BOOT 0    // 0 = the canards come up LIMP and stay limp
+                                 // until a bench command or arming takes
+                                 // them. Boot-driving to raw center jams a
+                                 // fin against its linkage stop whenever the
+                                 // servos or horns have changed and 1500 us
+                                 // is no longer fin-neutral - a digital
+                                 // servo then holds there at stall current.
+                                 // Set 1 only with a verified linkage.
 static const uint8_t SERVO_CH[4] = { 0, 1, 2, 3 };
 static const float SERVO_CENTER_US[4] = { 1500, 1500, 1500, 1500 };
 // Pulse per degree of canard deflection; SIGN = linkage direction. Initial
@@ -591,6 +599,57 @@ static float applyAuthority() {
   return auth;
 }
 
+// ---- canard fin map ------------------------------------------------------
+// Which PCA channel drives each canard index, and which way that fin swings
+// for a rising pulse. Persisted in the same flash record as the linkage
+// tables (cfgcodec v3), because the two are measured in one bench pass.
+static bool fin_map_saved_ = true;   // live map matches what is in flash
+
+static void finMapFromServos(cfgcodec::FinMap *m) {
+  for (int i = 0; i < 4; ++i) {
+    m->ch[i] = servos.channels()[i];
+    m->dir[i] = (servos.usPerDeg()[i] >= 0) ? (int8_t)1 : (int8_t)-1;
+  }
+}
+
+// A direction change only reaches fins WITHOUT a measured table: a
+// calibrated table already carries the direction in its own slope, so
+// re-synthesizing it would throw the measurement away.
+static void relinkAfterMapChange() {
+  LinkageCal all[4];
+  for (int i = 0; i < 4; ++i) {
+    all[i] = servos.linkage()[i];
+    if (!(lcal_fins_ & (1u << i))) all[i].n = 0;
+  }
+  servos.setLinkage(all);
+  applyAuthority();
+}
+
+static void applyFinMap(const cfgcodec::FinMap &m) {
+  uint8_t ch[4];
+  float upd[4];
+  for (int i = 0; i < 4; ++i) {
+    ch[i] = m.ch[i];
+    float mag = fabsf(SERVO_US_PER_DEG[i]);
+    upd[i] = (m.dir[i] < 0) ? -mag : mag;
+  }
+  servos.setChannelMap(ch);
+  servos.setUsPerDeg(upd);
+  relinkAfterMapChange();
+}
+
+static void finDump(uint64_t now) {
+  cfgcodec::FinMap m;
+  finMapFromServos(&m);
+  uint8_t cal[4];
+  float fa[4];
+  for (int i = 0; i < 4; ++i) {
+    cal[i] = (lcal_fins_ & (1u << i)) ? 1 : 0;
+    fa[i] = linkage::endAuthorityDeg(servos.linkage()[i]);
+  }
+  telem::emitFin(now, m.ch, m.dir, cal, fa, applyAuthority(), fin_map_saved_);
+}
+
 // Structured dump of the linkage tables + staged points as "lcal" records;
 // the viewer's point list and graph re-render on every one.
 static void lcalDump(uint64_t now) {
@@ -950,6 +1009,94 @@ static void framCommand(uint64_t now, const char *a) {
   telem::emitMsg(now, "fram: start|stop|dump|raw|flight|mark n|test|?");
 }
 
+static void finCommand(uint64_t now, const char *a, char **save) {
+  char b[112];
+  if (a == nullptr || strcmp(a, "?") == 0) {
+    cfgcodec::FinMap m;
+    finMapFromServos(&m);
+    long a10 = lroundf(applyAuthority() * 10.0f);
+    // <= 48 chars so the reply survives the LoRa msg frame.
+    snprintf(b, sizeof(b), "fin: 0=%u%c 1=%u%c 2=%u%c 3=%u%c a%ld.%ld%s",
+             (unsigned)m.ch[0], m.dir[0] < 0 ? '-' : '+',
+             (unsigned)m.ch[1], m.dir[1] < 0 ? '-' : '+',
+             (unsigned)m.ch[2], m.dir[2] < 0 ? '-' : '+',
+             (unsigned)m.ch[3], m.dir[3] < 0 ? '-' : '+',
+             a10 / 10, labs(a10) % 10, fin_map_saved_ ? "" : " UNSAVED");
+    telem::emitMsg(now, b);
+    finDump(now);
+    return;
+  }
+  if (control.mode() != ctl::CM_IDLE) {
+    telem::emitMsg(now, "cmd: fin refused - only while IDLE");
+    return;
+  }
+  if (strcmp(a, "save") == 0) {
+    cfgcodec::FinMap m;
+    finMapFromServos(&m);
+    telem::emitMsg(now, "fin: saving to flash - board freezes ~2 s");
+    TELEM_SERIAL.flush();
+    bool ok = cfgstore::saveFinMap(m);
+    framlog.event(nowMs(now), (uint8_t)control.mode(),
+                  ok ? fl::EV_CFG_SAVED : fl::EV_CFG_FAIL, 3, 0);
+    if (ok) fin_map_saved_ = true;
+    telem::emitMsg(now, ok ? "fin: map saved" : "fin: flash save FAILED");
+    finDump(now);
+    return;
+  }
+  if (strcmp(a, "reset") == 0) {
+    cfgcodec::FinMap m;
+    for (int i = 0; i < 4; ++i) {
+      m.ch[i] = SERVO_CH[i];
+      m.dir[i] = (SERVO_US_PER_DEG[i] >= 0) ? (int8_t)1 : (int8_t)-1;
+    }
+    applyFinMap(m);
+    fin_map_saved_ = false;
+    telem::emitMsg(now, "fin: map back to compiled defaults ($fin save to keep)");
+    finDump(now);
+    return;
+  }
+  int idx = atoi(a);
+  if (idx < 0 || idx > 3 || (idx == 0 && a[0] != '0')) {
+    telem::emitMsg(now, "cmd: fin wants <0-3> <ch 0-15> <cw|ccw> | save | reset | ?");
+    return;
+  }
+  char *cs = strtok_r(nullptr, " ", save);
+  char *ds = strtok_r(nullptr, " ", save);
+  if (cs == nullptr || ds == nullptr) {
+    telem::emitMsg(now, "cmd: fin wants <0-3> <ch 0-15> <cw|ccw>");
+    return;
+  }
+  int ch = atoi(cs);
+  if (ch < 0 || ch > 15 || (ch == 0 && cs[0] != '0')) {
+    telem::emitMsg(now, "cmd: fin - channel 0-15");
+    return;
+  }
+  bool cw;
+  if (strcmp(ds, "cw") == 0) {
+    cw = true;
+  } else if (strcmp(ds, "ccw") == 0) {
+    cw = false;
+  } else {
+    telem::emitMsg(now, "cmd: fin - direction cw or ccw");
+    return;
+  }
+  cfgcodec::FinMap m;
+  finMapFromServos(&m);
+  m.ch[idx] = (uint8_t)ch;
+  m.dir[idx] = cw ? (int8_t)1 : (int8_t)-1;
+  if (!cfgcodec::mapSane(m)) {
+    telem::emitMsg(now, "fin: refused - that channel already drives another canard");
+    return;
+  }
+  applyFinMap(m);
+  fin_map_saved_ = false;
+  snprintf(b, sizeof(b), "fin: S%d = ch%d %s%s", idx, ch, cw ? "cw" : "ccw",
+           (lcal_fins_ & (1u << idx))
+               ? " (measured table keeps its own direction)" : "");
+  telem::emitMsg(now, b);
+  finDump(now);
+}
+
 static void execCommand(char *line) {
   const uint64_t now = monoNow();
   char *save = nullptr;
@@ -957,6 +1104,13 @@ static void execCommand(char *line) {
   if (cmd == nullptr) { telem::emitMsg(now, "cmd: unknown"); return; }
   if (strcmp(cmd, "ping") == 0) {
     telem::emitMsg(now, "cmd: pong");
+    return;
+  }
+  if (strcmp(cmd, "fin") == 0 || strcmp(cmd, "fin?") == 0) {
+    char *fsave = save;
+    const char *a = (strcmp(cmd, "fin?") == 0)
+                        ? nullptr : strtok_r(nullptr, " ", &fsave);
+    finCommand(now, a, &fsave);
     return;
   }
   if (strcmp(cmd, "fram") == 0 || strcmp(cmd, "fram?") == 0) {
@@ -1474,7 +1628,9 @@ static void execCommand(char *line) {
     }
     char *a = strtok_r(nullptr, " ", &save);
     if (a == nullptr) {
-      telem::emitMsg(now, "cmd: servo wants <0-3> <us> | center | off | sweep");
+      telem::emitMsg(now,
+                     "cmd: servo wants <0-3> <us> | center | off | sweep | "
+                     "guard <min> <max>");
       return;
     }
     if (strcmp(a, "center") == 0) {
@@ -1485,6 +1641,19 @@ static void execCommand(char *line) {
     if (strcmp(a, "off") == 0) {
       servos.off();
       telem::emitMsg(now, "cmd: servo pulses off (limp)");
+      return;
+    }
+    if (strcmp(a, "guard") == 0) {
+      char *lo = strtok_r(nullptr, " ", &save);
+      char *hi = strtok_r(nullptr, " ", &save);
+      char gb[96];
+      if (lo != nullptr && hi != nullptr) {
+        servos.setGuard((float)atof(lo), (float)atof(hi));
+      }
+      snprintf(gb, sizeof(gb), "servo: guard %ld-%ld us%s",
+               lroundf(servos.guardMin()), lroundf(servos.guardMax()),
+               (lo == nullptr) ? " (wants <min> <max>)" : "");
+      telem::emitMsg(now, gb);
       return;
     }
     if (strcmp(a, "sweep") == 0) {
@@ -1889,6 +2058,7 @@ void setup() {
   }
   svc.min_us = SERVO_MIN_US;
   svc.max_us = SERVO_MAX_US;
+  svc.drive_at_boot = (SERVO_DRIVE_AT_BOOT != 0);
   svc.write_period_us = servo_poll_us_;
   servos.begin(&Wire, svc);
   pca_retry_next_us_ = monoNow() + 1000000ull;  // recovery probe cadence
@@ -1901,11 +2071,20 @@ void setup() {
       }
     }
   }
+  {
+    cfgcodec::FinMap fm;
+    if (cfgstore::loadFinMap(&fm)) {
+      applyFinMap(fm);
+      fin_map_saved_ = true;
+    }
+  }
   // Drive every fin to its calibrated 0 deg (neutral) at boot - AFTER the
   // linkage tables are loaded, so "straight" means each fin's designated
-  // zero, not the raw 1500 us servo center. The first servo service tick
-  // pushes these targets to the PCA.
-  servos.center();
+  // zero, not the raw 1500 us servo center.
+  // SERVO_DRIVE_AT_BOOT 0 skips this: center() takes ownership and would
+  // clear the limp flag begin() just set, which is the whole point of
+  // booting limp after a servo swap.
+  if (SERVO_DRIVE_AT_BOOT != 0) servos.center();
 
   ctl::Config cc;
   cc.kp_rate = CTL_KP_RATE;
@@ -1968,6 +2147,7 @@ void setup() {
   } else {
     telem::emitMsg(bus, "cfg: no stored mag cal (compile-time offsets)");
   }
+  finDump(bus);
   telem::emitMsg(bus, !lora.present()
                           ? "lora SX1278 (SPI1): NOT FOUND"
                           : (link::muted()
@@ -1983,8 +2163,10 @@ void setup() {
              (unsigned)fb_reset_cause_);
     telem::emitMsg(bus, fb);
   }
-  telem::emitMsg(bus, servos.present() ? "pwm PCA9685 @0x40: OK"
-                                       : "pwm PCA9685 @0x40: NOT FOUND");
+  telem::emitMsg(bus, !servos.present() ? "pwm PCA9685 @0x40: NOT FOUND"
+                      : (SERVO_DRIVE_AT_BOOT == 0)
+                            ? "pwm PCA9685 @0x40: OK - canards LIMP at boot"
+                            : "pwm PCA9685 @0x40: OK - canards driven to center");
   {
     int ncal = 0;
     for (int i = 0; i < 4; ++i) {

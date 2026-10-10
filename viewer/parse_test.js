@@ -136,5 +136,15 @@ check("lcal stage record keeps entry order",
   check("fram raw record keeps its hex", p3.kind === "fram" && p3.rec.a === 32 && p3.rec.d === "00ff");
 }
 
+// Canard fin map record.
+{
+  const p = parseLine(JSON.stringify({ t: "fin", us: 1, ch: [2,0,3,1], dir: [1,-1,1,-1],
+                                       cal: [1,0,1,1], fa: [12.5,8,14,9], auth: 8, saved: 1 }));
+  check("fin record classified", p.kind === "fin" && p.rec.ch[0] === 2 && p.rec.dir[1] === -1);
+  check("fin record keeps authority and saved flag", p.rec.auth === 8 && p.rec.saved === 1);
+  check("fin record without a 4-long ch array is an error",
+        parseLine(JSON.stringify({ t: "fin", ch: [0,1] })).kind === "error");
+}
+
 console.log(`\n${pass}/${pass + fail} checks passed${fail ? " — FAILURES ABOVE" : ""}`);
 process.exit(fail ? 1 : 0);

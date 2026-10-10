@@ -10,6 +10,11 @@
 #include "linkage.h"
 #include "pca9685.h"
 
+// The widest window setGuard() may ever open to. The runtime guard can only
+// narrow inside this; nothing in the firmware can ask for a pulse outside it.
+#define SERVO_GUARD_MIN_US 900.0f
+#define SERVO_GUARD_MAX_US 2100.0f
+
 struct ServoConfig {
   uint8_t addr;            // PCA9685 I2C address
   float frame_hz;          // PWM frame rate (spec 50; MG90S-class analog
@@ -18,13 +23,25 @@ struct ServoConfig {
   float center_us[4];      // linkage-neutral pulse per canard
   float us_per_deg[4];     // pulse per degree of deflection, SIGN = linkage
                            // direction (set after the first bench check)
-  float min_us, max_us;    // absolute pulse guard
+  float min_us, max_us;    // absolute pulse guard (runtime: setGuard)
   uint32_t write_period_us;
+  // false = the canards come up LIMP and stay limp until something takes
+  // them (center/testUs/sweep/scan/fin-test, or arming). Boot-driving a
+  // servo to raw center is how a fresh servo swap jams a fin against its
+  // linkage stop at every power-up - see SERVO_DRIVE_AT_BOOT.
+  bool drive_at_boot = true;
 };
 
 class Servos {
  public:
   bool begin(TwoWire *wire, const ServoConfig &cfg);
+
+  // Narrow (or restore) the absolute pulse guard at runtime: bench-discovered
+  // mechanical limits of a new servo, so no command can reach a stop.
+  // Clamped to the compile-time envelope and to min < max.
+  void setGuard(float min_us, float max_us);
+  float guardMin() const { return cfg_.min_us; }
+  float guardMax() const { return cfg_.max_us; }
 
   // Deflections from the controller (TRUE canard degrees, already mixed).
   // Converted to pulses through the per-fin linkage tables.
@@ -34,6 +51,17 @@ class Servos {
   // synthesized default that reproduces the compile-time linear map.
   void setLinkage(const LinkageCal in[4]);
   const LinkageCal *linkage() const { return lcal_; }
+
+  // Fin map. setChannelMap re-points each canard at a PCA channel and
+  // releases any channel it no longer drives, so a re-mapped servo is never
+  // left holding a pulse from its old slot. setUsPerDeg records the per-fin
+  // direction; the CALLER re-applies setLinkage() afterwards, because only
+  // it knows which fins have a measured table (whose slope already carries
+  // the direction) and which fall back to a synthesized default.
+  void setChannelMap(const uint8_t ch[4]);
+  void setUsPerDeg(const float upd[4]);
+  const uint8_t *channels() const { return cfg_.ch; }
+  const float *usPerDeg() const { return cfg_.us_per_deg; }
   float deflToUs(int fin, float d_deg) const;
   // min symmetric canard authority across the four fins (table ends).
   float authorityDeg() const;

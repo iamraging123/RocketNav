@@ -548,6 +548,63 @@ int main() {
     CHECK(sb.canardTestPhase() == -1, "test ends idle (settled at neutral)");
   }
 
+  printf("== servos: limp at boot, runtime pulse guard ==\n");
+  {
+    TwoWire wl;
+    Servos sl;
+    ServoConfig c;
+    c.addr = 0x40; c.frame_hz = 50.0f;
+    for (int i = 0; i < 4; ++i) {
+      c.ch[i] = (uint8_t)i; c.center_us[i] = 1500.0f; c.us_per_deg[i] = 10.0f;
+    }
+    c.min_us = 900.0f; c.max_us = 2100.0f; c.write_period_us = 20000;
+    c.drive_at_boot = false;   // the servo-swap default: nothing moves at boot
+    CHECK(sl.begin(&wl, c), "servos begin (limp)");
+    uint64_t t = 1000000;
+    wl.txns.clear();
+    sl.service(t);
+    t += 20000;
+    sl.service(t);
+    CHECK(lastAt(wl, 0x06) == nullptr && lastAt(wl, 0x0A) == nullptr &&
+              lastAt(wl, 0x0E) == nullptr && lastAt(wl, 0x12) == nullptr,
+          "limp boot emits NO pulse on any canard channel");
+
+    // The first bench command takes ownership and re-energizes.
+    wl.txns.clear();
+    sl.center();
+    t += 20000;
+    sl.service(t);
+    CHECK(lastAt(wl, 0x06) != nullptr, "a bench command re-energizes after a limp boot");
+
+    // Guard narrowing clamps both the raw bench path and control output.
+    sl.setGuard(1200.0f, 1800.0f);
+    CHECK(sl.guardMin() == 1200.0f && sl.guardMax() == 1800.0f, "guard narrowed");
+    auto cnt0 = [&]() {
+      const TwoWire::Txn *t = lastAt(wl, 0x06);
+      return t ? (int)(t->bytes[3] | (t->bytes[4] << 8)) : -1;
+    };
+    wl.txns.clear();
+    sl.testUs(0, 2100.0f);
+    t += 20000;
+    sl.service(t);
+    CHECK(cnt0() == countsAt(1800.0f, 121), "raw 2100 us clamps to the guard (%d vs %d)",
+          cnt0(), countsAt(1800.0f, 121));
+    // The raw check above already left ch0 at 1800, and writes fire only on
+    // change - so aim at the OTHER end: -40 deg = 1100 us, under the guard.
+    float dd[4] = { -40.0f, 0, 0, 0 };
+    wl.txns.clear();
+    sl.setDeflDeg(dd);
+    t += 20000;
+    sl.service(t);
+    CHECK(cnt0() == countsAt(1200.0f, 121), "control output clamps to the guard too (%d vs %d)",
+          cnt0(), countsAt(1200.0f, 121));
+    sl.setGuard(500.0f, 2500.0f);
+    CHECK(sl.guardMin() == 900.0f && sl.guardMax() == 2100.0f,
+          "guard cannot open past the compile-time envelope");
+    sl.setGuard(1500.0f, 1510.0f);
+    CHECK(sl.guardMin() == 900.0f, "a degenerate window is refused");
+  }
+
   printf("\n%d checks, %d failed -> %s\n", checks, fails,
          fails ? "FAIL" : "PASS");
   return fails ? 1 : 0;

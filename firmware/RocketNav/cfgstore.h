@@ -5,14 +5,15 @@
 //
 // The whole record is cached in RAM at first access and rewritten as a
 // unit on every save, so saving one calibration never loses the other.
-// A v1 record (mag only, from older firmware) is read transparently; the
-// first save upgrades it to v2. Erasing the sector stalls the CPU for up
+// A v1 record (mag only) or v2 (mag + linkage) from older firmware is read
+// transparently; the first save upgrades it to v3 (adds the fin map). Erasing the sector stalls the CPU for up
 // to ~2 s (code executes from the same flash bank) - callers only save on
 // the bench, on an explicit ground command, never in flight.
 #pragma once
 
 #include <stdint.h>
 
+#include "cfgcodec.h"
 #include "linkage.h"
 
 namespace cfgstore {
@@ -27,6 +28,11 @@ bool saveMagHard(const float hard_ut[3]);
 bool loadLinkage(LinkageCal lc[4]);
 bool saveLinkage(const LinkageCal lc[4]);
 
+// Canard fin map (PCA channel + direction per canard index). load returns
+// false when nothing sane is stored; map still receives the defaults.
+bool loadFinMap(cfgcodec::FinMap *map);
+bool saveFinMap(const cfgcodec::FinMap &map);
+
 // Non-destructive report of what is PHYSICALLY in the flash sector right
 // now (re-read past the cache) - the on-hardware "did the save persist?"
 // diagnostic behind `$lcal flash`.
@@ -36,8 +42,10 @@ struct FlashInfo {
   bool crc_ok;
   bool mag_ok;
   bool lnk_ok;
+  bool map_ok;
   uint8_t fin_n[4]; // stored point count per fin
   float hard[3];
+  cfgcodec::FinMap map;
 };
 bool inspectRaw(FlashInfo *out);
 

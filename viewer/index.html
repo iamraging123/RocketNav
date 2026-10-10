@@ -91,6 +91,18 @@
      velocity, so those hide while the stream is the recovery profile. */
   body.recovery .fo { display: none !important; }
   #histSlider { flex: 0 0 150px; min-width: 150px; }
+  #finWrap { display: grid; grid-template-columns: minmax(0, 170px) minmax(0, 1fr);
+    gap: 6px; align-items: start; margin-bottom: 5px; }
+  @media (max-width: 520px) { #finWrap { grid-template-columns: 1fr; } }
+  #finMap { width: 100%; height: auto; display: block; cursor: pointer; }
+  #finTbl { width: 100%; border-collapse: collapse; font-size: 10.5px; }
+  #finTbl th { text-align: left; font-weight: 600; font-size: 9px; color: var(--dim);
+    text-transform: uppercase; letter-spacing: .06em; border-bottom: 1px solid var(--edge);
+    padding: 2px 3px; }
+  #finTbl td { border-bottom: 1px solid var(--line); padding: 2px 3px;
+    font-variant-numeric: tabular-nums; }
+  #finTbl tr.on td { background: var(--panel2); color: var(--text); }
+  #finTbl td.bad { color: var(--bad); }
   .fbnote { font-size: 11px; color: var(--dim); margin-top: 6px; line-height: 1.45; }
   #chFbAlt { height: 170px; }
   #pg-log .charts { grid-template-columns: 1fr; }
@@ -532,14 +544,23 @@
           <div class="ctlrow"><button id="svCenter" class="secondary mini">Center</button><button id="svSweep" class="secondary mini">Sweep 6 s</button><button id="svOff" class="secondary mini">Pulses off</button></div>
         </div>
         <div class="panel">
-          <h2>Canard angle</h2>
+          <h2>Canard bench</h2>
+          <div id="finWrap">
+            <svg id="finMap" viewBox="0 0 150 150" role="img" aria-label="Canard layout seen from behind; click a fin to select it"></svg>
+            <div>
+              <table id="finTbl"><thead><tr><th>fin</th><th>ch</th><th>dir</th><th>tbl</th><th>&plusmn;&deg;</th></tr></thead><tbody id="finBody"></tbody></table>
+              <div class="ctlrow uo" style="margin-top:4px"><span class="k2">ch</span><button class="secondary mini finCh" data-c="0">0</button><button class="secondary mini finCh" data-c="1">1</button><button class="secondary mini finCh" data-c="2">2</button><button class="secondary mini finCh" data-c="3">3</button><button id="finIdent" class="secondary mini" title="Wiggle this fin's PCA channel so you can see which fin moves.">Identify</button></div>
+              <div class="ctlrow uo"><span class="k2">+&micro;s</span><button id="finCw" class="secondary mini">cw</button><button id="finCcw" class="secondary mini">ccw</button><button id="finSave" class="secondary mini" title="Persist the fin map to flash (freezes the board ~2 s).">Save map</button><button id="finReset" class="secondary mini">Defaults</button></div>
+            </div>
+          </div>
+          <div class="ctlrow"><span class="ro" id="finNote" style="color:var(--dim);font-size:10.5px">&mdash;</span></div>
           <div class="ctlrow"><span class="k2">canard</span><select id="angCh"></select><input type="number" id="angVal" value="0" min="-25" max="25" step="1"><span class="k2" style="min-width:0">&deg;</span><button id="angSet" class="secondary mini">Set</button></div>
           <div class="ctlrow"><input type="range" id="angSlide" min="-25" max="25" step="1" value="0"></div>
           <div class="ctlrow"><button id="angCenter" class="secondary mini" title="Command 0&deg; canard = calibrated neutral (fin straight). Calibrate the fin first in Linkage cal.">Neutral 0&deg;</button><button id="angTest" class="secondary mini" title="All four fins: +10&deg; then -10&deg; then 0&deg; (calibrated). Watch each fin move.">Test all fins</button><button id="angRel" class="secondary mini">Release</button><button id="angAllOff" class="secondary mini">All off</button><button id="angScan" class="secondary mini" title="Wiggles every PCA channel in turn (~19 s). Watch which servo moves on which console announcement to learn its real channel.">Scan 16 ch</button></div>
           <div class="ctlrow"><span class="ro" style="color:var(--dim);font-size:11px">true canard degrees via linkage cal &middot; 0&deg; = neutral. Calibrate first or 0&deg; is just the raw servo center.</span></div>
         </div>
         <div class="panel uo">
-          <h2>Linkage cal</h2>
+          <h2>Linkage cal &middot; selected fin</h2>
           <div class="ctlrow"><span class="k2">fin</span><select id="lcFin"><option value="0">S0</option><option value="1">S1</option><option value="2">S2</option><option value="3">S3</option></select><button id="lcStart" class="secondary mini">Start</button><button id="lcAbort" class="secondary mini">End</button></div>
           <div class="ctlrow"><span class="k2">jog &micro;s</span><button id="lcJm50" class="secondary mini">-50</button><button id="lcJm10" class="secondary mini">-10</button><button id="lcJp10" class="secondary mini">+10</button><button id="lcJp50" class="secondary mini">+50</button></div>
           <div class="ctlrow"><button id="lcCenter" class="secondary mini" title="Record the current pulse as canard 0&deg; (jog until flush against a straightedge first).">Mark center 0&deg;</button><input type="number" id="lcDeg" value="0" step="0.5" title="Measured canard angle (phone inclinometer) at the current pulse."><button id="lcPoint" class="secondary mini">Save point</button><button id="lcUndo" class="secondary mini">Undo</button></div>
@@ -639,6 +660,7 @@
 /* Classify one serial line. Returns {kind, rec?}:
    kind = "empty" | "error" (unparseable / wrong shape) | "hdr" | "org" |
           "st" | "fram" (black-box dump record, r.k names the part) |
+          "fin" (canard fin map) |
           "unknown" (valid JSON, unrecognized t). */
 function parseLine(line) {
   const s = line.trim();
@@ -660,6 +682,10 @@ function parseLine(line) {
   }
   if (r.t === "cal") return { kind: "cal", rec: r };
   if (r.t === "lcal") return { kind: "lcal", rec: r };
+  if (r.t === "fin") {
+    if (!Array.isArray(r.ch) || r.ch.length !== 4) return { kind: "error" };
+    return { kind: "fin", rec: r };
+  }
   if (r.t === "fram") {
     if (typeof r.k !== "string") return { kind: "error" };
     return { kind: "fram", rec: r };
@@ -767,6 +793,9 @@ const S = {
   lastRxWall: 0,
   pingSentAt: 0, pingRtt: null,      // $ping round trip (ms), any link
   fram: { hdr: null, evt: [], trj: [], sum: [], raw: [], dumping: false, statusTxt: null },
+  fin: null,                         // last "fin" record: ch/dir/cal/fa/auth/saved
+  finSel: 0,                         // selected canard index, shared by both panels
+  finDirty: true,
   framDirty: true,
 };
 
@@ -785,6 +814,7 @@ function resetSession() {
   // Linkage tables belong to the CONNECTION: stale ones from a previous
   // rocket/boot invite calibration decisions against the wrong fin data.
   S.lcal = { fins: [null, null, null, null], stage: null };
+  S.fin = null; S.finDirty = true;
   renderLcalPoints();
   for (const k in charts) charts[k].clear();
   if (S.paused) setPaused(false);
@@ -1571,11 +1601,13 @@ function handleLine(line) {
     S.framDirty = true;
     return;
   }
+  if (p.kind === "fin") { S.fin = p.rec; S.finDirty = true; return; }
   if (p.kind === "lcal") {
     const q = p.rec;
     if (q.src === 2) S.lcal.stage = (q.fin >= 0) ? q : null;
     else if (q.fin >= 0 && q.fin < 4) S.lcal.fins[q.fin] = q;
     renderLcalPoints();
+    S.finDirty = true;
     return;
   }
   const r = p.rec;
@@ -1747,6 +1779,7 @@ function updateDom() {
   // Black-box tab first: it has no dependence on a live state record and
   // updateDom returns early below when none has arrived yet.
   if (S.framDirty) { S.framDirty = false; renderFram(); }
+  if (S.finDirty) { S.finDirty = false; renderFinMap(); }
   if ($("chFbAlt").offsetParent !== null) drawFbAlt();
 
   const active = S.connected || S.sim;
@@ -2026,6 +2059,124 @@ function updateDom() {
     S.consoleDirty = false;
     pinLog($("console"), S.consoleLines.join("\n"));
   }
+}
+
+/* ================= canard fin map =================
+   Looking FORWARD from behind the rocket, which is the viewpoint in which
+   positive roll (right-hand rule about body X = nose) appears clockwise.
+   Fin i sits at 12/3/6/9 o'clock for i = 0..3; each draws at its live
+   deflection (cdef) and carries a wedge sized by the travel its linkage
+   table allows (fa), because the table ends ARE the mechanical limits. */
+const FIN_ANG = [-90, 0, 90, 180];
+function finTravel(i) {
+  if (S.fin && Array.isArray(S.fin.fa) && S.fin.fa[i] != null) return S.fin.fa[i];
+  const t = S.lcal.fins[i];
+  if (t && t.deg && t.deg.length >= 2)
+    return Math.min(Math.abs(t.deg[0]), Math.abs(t.deg[t.deg.length - 1]));
+  return 0;
+}
+function svgEl(n, at) {
+  const e = document.createElementNS("http://www.w3.org/2000/svg", n);
+  for (const k in at) e.setAttribute(k, at[k]);
+  return e;
+}
+function renderFinMap() {
+  const svg = $("finMap");
+  if (!svg) return;
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  const CX = 75, CY = 75, RB = 19, R0 = 19, R1 = 56, HW = 6.5;
+  const r = S.paused ? S.view : S.last;
+  const cdef = (r && r.cdef) ? r.cdef : [0, 0, 0, 0];
+  const known = !!S.fin;
+  const dirs = known ? S.fin.dir : [1, 1, 1, 1];
+  const chs = known ? S.fin.ch : [null, null, null, null];
+
+  const defs = svgEl("defs", {});
+  const mk = svgEl("marker", { id: "finAh", viewBox: "0 0 10 10", refX: "8", refY: "5",
+                               markerWidth: "5", markerHeight: "5", orient: "auto" });
+  mk.appendChild(svgEl("path", { d: "M0 0 L10 5 L0 10 z", fill: "var(--c2)" }));
+  defs.appendChild(mk);
+  svg.appendChild(defs);
+
+  svg.appendChild(svgEl("circle", { cx: CX, cy: CY, r: RB, fill: "none",
+                                    stroke: "var(--dim2)", "stroke-width": "1" }));
+  for (let i = 0; i < 4; i++) {
+    const a = FIN_ANG[i], rad = a * Math.PI / 180;
+    const tv = finTravel(i);
+    if (tv > 0.2) {
+      svg.appendChild(svgEl("line", {
+        x1: CX + Math.cos(rad) * R0, y1: CY + Math.sin(rad) * R0,
+        x2: CX + Math.cos(rad) * R1, y2: CY + Math.sin(rad) * R1,
+        stroke: "var(--c1)", "stroke-width": String(Math.max(2, Math.min(tv, 25) * 0.9)),
+        opacity: ".14"
+      }));
+    }
+    const tilt = Math.max(-30, Math.min(30, (cdef[i] || 0))) * (dirs[i] < 0 ? -1 : 1);
+    const g = svgEl("g", { transform: "rotate(" + a + " " + CX + " " + CY + ")",
+                           style: "cursor:pointer" });
+    const inner = svgEl("g", { transform: "rotate(" + (tilt * 0.9) + " " + (CX + R0) + " " + CY + ")" });
+    inner.appendChild(svgEl("rect", {
+      x: CX + R0, y: CY - HW, width: R1 - R0, height: HW * 2,
+      fill: i === S.finSel ? "var(--panel2)" : "none",
+      stroke: i === S.finSel ? "var(--mark)" : "var(--dim)",
+      "stroke-width": i === S.finSel ? "1.8" : "1"
+    }));
+    g.appendChild(inner);
+    const lx = CX + R0 + 7;
+    const t = svgEl("text", { x: lx, y: CY + 3, "font-size": "8.5", "font-weight": "600",
+                              fill: "var(--text)", "font-family": "var(--mono)",
+                              transform: "rotate(" + (-a) + " " + lx + " " + CY + ")" });
+    t.textContent = "S" + i;
+    g.appendChild(t);
+    g.onclick = () => { selectFin(i); };
+    svg.appendChild(g);
+    const tx = CX + Math.cos(rad) * (R1 + 8), ty = CY + Math.sin(rad) * (R1 + 8);
+    const ux = -Math.sin(rad) * (dirs[i] < 0 ? -1 : 1);
+    const uy = Math.cos(rad) * (dirs[i] < 0 ? -1 : 1);
+    svg.appendChild(svgEl("path", {
+      d: "M " + (tx - ux * 7) + " " + (ty - uy * 7) + " L " + (tx + ux * 7) + " " + (ty + uy * 7),
+      stroke: "var(--c2)", "stroke-width": "1.6", "marker-end": "url(#finAh)", fill: "none"
+    }));
+  }
+
+  const cal = (S.fin && S.fin.cal) ? S.fin.cal : [0, 0, 0, 0];
+  const dup = chs.some((c, i) => chs.indexOf(c) !== i);
+  let lim = 0;
+  for (let i = 1; i < 4; i++) if (finTravel(i) < finTravel(lim)) lim = i;
+  HT("finBody", [0, 1, 2, 3].map(i => {
+    const tv = finTravel(i);
+    return "<tr class='" + (i === S.finSel ? "on" : "") + "'><td>S" + i + "</td><td" +
+      (dup ? " class='bad'" : "") + ">" + (known ? chs[i] : "—") + "</td><td>" +
+      (known ? (dirs[i] < 0 ? "ccw" : "cw") : "—") + "</td><td" +
+      (known && !cal[i] ? " class='bad'" : "") + ">" +
+      (known ? (cal[i] ? "cal" : "def") : "—") + "</td><td" +
+      (known && i === lim ? " class='bad'" : "") + ">" +
+      (tv > 0 ? tv.toFixed(1) : "—") + "</td></tr>";
+  }).join(""));
+
+  const auth = known && S.fin.auth != null ? S.fin.auth : finTravel(lim);
+  T("finNote", !known
+      ? "fin map not reported on this link — USB only · clockwise from behind = +roll"
+      : dup
+      ? "two canards share a PCA channel — one servo is unpowered"
+      : "authority " + fmt(auth, 1) + "° (set by S" + lim + ")" +
+        (S.fin.saved === 0 ? " · map UNSAVED" : "") +
+        " · clockwise from behind = +roll");
+  [].forEach.call(document.querySelectorAll("button.finCh"), b => {
+    b.classList.toggle("armred", known && +b.dataset.c === chs[S.finSel]);
+  });
+  $("finCw").classList.toggle("armred", known && dirs[S.finSel] >= 0);
+  $("finCcw").classList.toggle("armred", known && dirs[S.finSel] < 0);
+}
+
+// One selection drives the diagram, the canard-angle box and the lcal box.
+function selectFin(i) {
+  S.finSel = i;
+  const a = $("angCh"), l = $("lcFin");
+  if (a) a.value = String(i);
+  if (l) l.value = String(i);
+  S.finDirty = true;
+  renderFinMap();
 }
 
 /* ================= black box (FRAM) tab ================= */
@@ -2519,12 +2670,34 @@ function sendPing() {
   sendCmd("$ping");
 }
 $("cmdPing").onclick = sendPing;
+if ($("angCh")) $("angCh").onchange = () => selectFin(+$("angCh").value || 0);
+if ($("lcFin")) $("lcFin").onchange = () => selectFin(+$("lcFin").value || 0);
 $("lbPing").onclick = sendPing;
 $("lbUnmute").onclick = () => sendCmd("$lora 1");
 $("lbMute").onclick = () => sendCmd("$lora 0");
 $("lbLoraQ").onclick = () => sendCmd("$lora?");
 $("lbBaseQ").onclick = () => sendCmd("$base?");
 $("lbRec").onclick = () => sendCmd("$lora rec");
+[].forEach.call(document.querySelectorAll("button.finCh"), b => {
+  b.onclick = () => {
+    const d = (S.fin && S.fin.dir) ? S.fin.dir[S.finSel] : 1;
+    sendCmd("$fin " + S.finSel + " " + b.dataset.c + " " + (d < 0 ? "ccw" : "cw"));
+  };
+});
+function finSetDir(cw) {
+  const ch = (S.fin && S.fin.ch) ? S.fin.ch[S.finSel] : S.finSel;
+  sendCmd("$fin " + S.finSel + " " + ch + " " + (cw ? "cw" : "ccw"));
+}
+$("finCw").onclick = () => finSetDir(true);
+$("finCcw").onclick = () => finSetDir(false);
+$("finIdent").onclick = () => {
+  const ch = (S.fin && S.fin.ch) ? S.fin.ch[S.finSel] : S.finSel;
+  sendCmd("$ang " + ch + " 60");
+  setTimeout(() => sendCmd("$ang " + ch + " 120"), 450);
+  setTimeout(() => sendCmd("$ang " + ch + " 90"), 900);
+};
+$("finReset").onclick = () => sendCmd("$fin reset");
+$("finSave").onclick = () => sendCmd("$fin save");
 // Record = wipe + start: two clicks within 5 s, like Arm.
 let fbArmT = 0;
 $("fbRecord").onclick = () => {

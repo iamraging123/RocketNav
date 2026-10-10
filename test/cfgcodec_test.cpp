@@ -27,6 +27,7 @@ static int checks = 0, fails = 0;
 // A byte buffer standing in for the flash sector.
 static uint8_t flash[sizeof(cfgcodec::Record)];
 
+static bool mp = false;   // map_ok out-param for parse()
 static void blank() { memset(flash, 0xFF, sizeof(flash)); }
 static void writeRecord(const cfgcodec::Record &r) {
   memcpy(flash, &r, sizeof(r));
@@ -38,7 +39,7 @@ int main() {
     blank();
     cfgcodec::Record r;
     bool m, l;
-    int v = cfgcodec::parse(flash, &r, &m, &l);
+    int v = cfgcodec::parse(flash, &r, &m, &l, &mp);
     CHECK(v == 0 && !m && !l, "erased sector = blank, nothing stored");
   }
 
@@ -60,8 +61,8 @@ int main() {
 
     cfgcodec::Record g;
     bool m, l;
-    int v = cfgcodec::parse(flash, &g, &m, &l);
-    CHECK(v == 2 && m && l, "parses as v2, mag+linkage present");
+    int v = cfgcodec::parse(flash, &g, &m, &l, &mp);
+    CHECK(v == 3 && m && l, "parses as v3, mag+linkage present");
     CHECK(fabsf(g.hard[0] - 12.5f) < 1e-6f && fabsf(g.hard[1] + 7.25f) < 1e-6f,
           "hard-iron survives the round trip");
     LinkageCal out[4];
@@ -85,7 +86,7 @@ int main() {
     flash[8] ^= 0x20;  // flip a bit in the payload
     cfgcodec::Record g;
     bool m, l;
-    int v = cfgcodec::parse(flash, &g, &m, &l);
+    int v = cfgcodec::parse(flash, &g, &m, &l, &mp);
     CHECK(v == 0 && !m, "bit flip fails CRC -> treated as blank");
   }
 
@@ -101,7 +102,7 @@ int main() {
     memcpy(flash + 16, &crc, 4);
     cfgcodec::Record g;
     bool m, l;
-    int v = cfgcodec::parse(flash, &g, &m, &l);
+    int v = cfgcodec::parse(flash, &g, &m, &l, &mp);
     CHECK(v == 1 && m && !l, "v1 reads as mag-only");
     CHECK(fabsf(g.hard[1] - 44.0f) < 1e-6f, "v1 hard-iron recovered");
     LinkageCal out[4];
@@ -123,7 +124,7 @@ int main() {
     // Load (as cfgstore would), add a linkage table, reseal, rewrite.
     cfgcodec::Record rec;
     bool m, l;
-    cfgcodec::parse(flash, &rec, &m, &l);
+    cfgcodec::parse(flash, &rec, &m, &l, &mp);
     LinkageCal lc[4];
     cfgcodec::toLinkage(rec, lc);
     lc[0].n = 2;
@@ -134,7 +135,7 @@ int main() {
     writeRecord(rec);
 
     cfgcodec::Record g;
-    cfgcodec::parse(flash, &g, &m, &l);
+    cfgcodec::parse(flash, &g, &m, &l, &mp);
     CHECK(m && l && fabsf(g.hard[2] - 3.0f) < 1e-6f && g.fin[0].n == 2,
           "after linkage save: mag STILL there and linkage stored");
 
@@ -146,7 +147,7 @@ int main() {
     cfgcodec::seal(&g);
     writeRecord(g);
     cfgcodec::Record g2;
-    cfgcodec::parse(flash, &g2, &m, &l);
+    cfgcodec::parse(flash, &g2, &m, &l, &mp);
     CHECK(l && g2.fin[0].n == 2 && g2.fin[0].us[1] == 1800,
           "after mag rewrite: linkage table SURVIVES");
   }
@@ -165,7 +166,7 @@ int main() {
     writeRecord(r);
     cfgcodec::Record g;
     bool m, l;
-    cfgcodec::parse(flash, &g, &m, &l);
+    cfgcodec::parse(flash, &g, &m, &l, &mp);
     CHECK(g.fin[2].n == 2 && g.fin[3].n == 0 && l,
           "bad fin 3 dropped to n=0, good fin 2 intact");
   }
@@ -189,6 +190,84 @@ int main() {
           "offset works with negative gain and nonzero angle");
   }
 
+
+  printf("== v3 fin map ==\n");
+  {
+    cfgcodec::Record r;
+    memset(&r, 0, sizeof(r));
+    float hard[3] = { 1.0f, 2.0f, 3.0f };
+    memcpy(r.hard, hard, sizeof(hard));
+    cfgcodec::mapDefaults(&r.map);
+    uint8_t ch[4] = { 2, 0, 3, 1 };
+    int8_t dir[4] = { 1, -1, 1, -1 };
+    for (int i = 0; i < 4; ++i) { r.map.ch[i] = ch[i]; r.map.dir[i] = dir[i]; }
+    cfgcodec::seal(&r);
+    blank();
+    writeRecord(r);
+    cfgcodec::Record g;
+    bool m, l;
+    int v = cfgcodec::parse(flash, &g, &m, &l, &mp);
+    bool same = true;
+    for (int i = 0; i < 4; ++i) {
+      if (g.map.ch[i] != ch[i] || g.map.dir[i] != dir[i]) same = false;
+    }
+    CHECK(v == 3 && mp && same, "fin map round trips through v3");
+
+    // A duplicated channel is refused rather than flown: it would leave one
+    // canard unpowered and double another.
+    cfgcodec::Record d = r;
+    d.map.ch[2] = d.map.ch[0];
+    cfgcodec::seal(&d);
+    blank();
+    writeRecord(d);
+    cfgcodec::Record g2;
+    cfgcodec::parse(flash, &g2, &m, &l, &mp);
+    CHECK(!mp && g2.map.ch[0] == 0 && g2.map.ch[3] == 3,
+          "duplicate channel rejected, defaults restored");
+
+    cfgcodec::Record z = r;
+    z.map.dir[1] = 0;   // unset direction is not a usable map
+    cfgcodec::seal(&z);
+    blank();
+    writeRecord(z);
+    cfgcodec::parse(flash, &g2, &m, &l, &mp);
+    CHECK(!mp, "dir 0 (unset) is not a sane map");
+
+    cfgcodec::FinMap ok;
+    cfgcodec::mapDefaults(&ok);
+    CHECK(!cfgcodec::mapSane(ok), "defaults are not sane until a direction is set");
+    for (int i = 0; i < 4; ++i) ok.dir[i] = 1;
+    CHECK(cfgcodec::mapSane(ok), "defaults + directions are sane");
+  }
+
+  printf("== v2 image upgrades ==\n");
+  {
+    // A record written by the PREVIOUS firmware: shorter, CRC over
+    // hard+fin only, and its crc word sits where v3 keeps the map.
+    struct FinRecV2 { uint8_t n; uint8_t pad[3]; float deg[5]; float us[5]; };
+    struct RecordV2 {
+      uint32_t magic; float hard[3]; FinRecV2 fin[4]; uint32_t crc;
+    } o;
+    memset(&o, 0, sizeof(o));
+    o.magic = cfgcodec::kMagicV2;
+    o.hard[0] = 4.5f; o.hard[1] = -6.0f; o.hard[2] = 9.5f;
+    o.fin[1].n = 2;
+    o.fin[1].deg[0] = -10; o.fin[1].deg[1] = 10;
+    o.fin[1].us[0] = 1400; o.fin[1].us[1] = 1600;
+    o.crc = cfgcodec::crc32((const uint8_t *)&o.hard,
+                            sizeof(o.hard) + sizeof(o.fin));
+    blank();
+    memcpy(flash, &o, sizeof(o));
+    cfgcodec::Record g;
+    bool m, l;
+    int v = cfgcodec::parse(flash, &g, &m, &l, &mp);
+    CHECK(v == 2 && m && l && !mp, "v2 image still readable, no map in it");
+    CHECK(fabsf(g.hard[2] - 9.5f) < 1e-6f && g.fin[1].n == 2 &&
+              g.fin[1].us[1] == 1600,
+          "v2 mag and linkage survive the upgrade read");
+    CHECK(g.map.ch[0] == 0 && g.map.ch[3] == 3 && g.map.dir[0] == 0,
+          "v2 upgrade leaves the map at defaults, direction unset");
+  }
   printf("\n%d checks, %d failed -> %s\n", checks, fails,
          fails ? "FAIL" : "PASS");
   return fails ? 1 : 0;

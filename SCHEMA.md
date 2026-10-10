@@ -251,6 +251,21 @@ euler to 2°, `ral` to 0.5 m and no rates/accel/velocity; flight `st` records
 carry `urssi` (RSSI of the base's uplink as heard by the rocket, null until
 one has arrived).
 
+## Record `"fin"` — the canard fin map
+
+Emitted at boot and after every `$fin` command. USB only: the air frame has
+no room for it, so over LoRa the viewer shows the map as unknown rather than
+assuming the compiled default.
+
+| key | type | description |
+|---|---|---|
+| `ch` | [4] | PCA channel driving canard 0..3 |
+| `dir` | [4] | +1 / −1: sign of servo µs per canard degree. +1 means a positive canard degree swings that fin's leading edge clockwise seen from behind, which is the positive roll sense |
+| `cal` | [4] | 1 = a measured linkage table is applied to that fin, 0 = synthesized default |
+| `fa` | [4] | per-fin travel, min(\|first deg\|, \|last deg\|) of its table — the wedge in the viewer's diagram |
+| `auth` | float | authority actually given to the controller: the smallest `fa`, clamped to `CTL_DEFL_MAX` |
+| `saved` | 0/1 | 1 = the live map matches what is stored in flash |
+
 ## Black box (FRAM)
 
 An FM24CL16B (2 048 B FRAM, I2C1 @0x50–0x57) holds an **opt-in** flight
@@ -309,7 +324,9 @@ the viewer connects to either port unchanged. Null rules mirror the USB
 record: `v` is `null` unless the filter is in RUN (`fst` 3); `ral`/`rvs` are
 `null` outside WAIT_FIX/RUN/ATT_ONLY (`fst` 2–4). `$base?` typed in the console
 reports base-side link statistics without transmitting.
+| `$fin <0-3> <ch 0-15> <cw\|ccw>` / `$fin save\|reset\|?` | the canard fin map: which PCA channel drives each canard and which way it swings. IDLE-only except `?`. A channel already used by another canard is refused. Changing the direction of a fin that has a measured linkage table only affects the synthesized fallback, since the table carries its own slope. `save` writes the flash record (freezes ~2 s), `reset` returns to the compiled defaults, `?` replies `fin: 0=<ch><+\|-> 1=… a<authority>[ UNSAVED]` (≤ 48 chars, so it survives the LoRa msg frame) and emits the `fin` record |
 | `$fram start\|stop\|?\|flight\|mark n\|test\|dump\|raw` | the FRAM black box (see "Black box"). `start` WIPES the previous recording and begins a new one (refused in ACTIVE); `stop` closes the flight summary and stops writing; `?` one status line (`fram: REC\|idle boot N fl N ev N tr N err N`); `flight` the latest summary as three lines (LoRa-sized); `mark n` a user marker event; `test` write/read on the spare bytes; `dump` / `raw` stream the contents as `fram` records - USB only, refused over LoRa. Nothing is written to the FRAM until `start` |
+| `$servo guard <min> <max>` | narrow the absolute pulse clamp at runtime to the bench-measured mechanical range of the fitted servos, so no command (raw, calibrated or from the controller) can drive a fin into a stop. Reports the window when called with no arguments; can only narrow inside the compile-time 900-2100 us envelope and refuses a window under 50 us wide. Not persisted - set it each bench session, or bake the numbers into `SERVO_MIN_US`/`SERVO_MAX_US` once the linkage is final |
 | `$magdiag` | register-level magnetometer probe, independent of the driver and its init state (~60 ms stall): replies with msg records carrying WHO_AM_I, CTRL_REG1–5 vs the intended config, STATUS, the six output registers read three ways (burst without the I²C auto-increment bit — the shelf-driver transaction shape, burst with it, and single-byte reads), a 12-poll ZYXDA/data-change liveness count, and one `magdiag: VERDICT …` line naming the likely fault class |
 | `$zero` | zeroes the sensor-drop and I²C error/reset counters |
 | `$rst` | replies `cmd: rebooting`, drains the stream, resets the MCU |

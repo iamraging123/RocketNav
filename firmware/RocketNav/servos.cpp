@@ -15,7 +15,9 @@ bool Servos::begin(TwoWire *wire, const ServoConfig &cfg) {
     tgt_us_[i] = cfg_.center_us[i];
     sent_us_[i] = -1;  // force the first write
   }
-  off_ = false;
+  // Limp at boot when configured: service() short-circuits on off_, so no
+  // pulse is ever emitted until a bench command or arming takes ownership.
+  off_ = !cfg_.drive_at_boot;
   sweep_ = false;
   scan_ = false;
   ctest_ = false;
@@ -69,6 +71,25 @@ void Servos::setLinkage(const LinkageCal in[4]) {
   }
 }
 
+void Servos::setChannelMap(const uint8_t ch[4]) {
+  for (int i = 0; i < 4; ++i) {
+    bool still_used = false;
+    for (int j = 0; j < 4; ++j) {
+      if (ch[j] == cfg_.ch[i]) still_used = true;
+    }
+    if (!still_used) pca_.setPwmUs(cfg_.ch[i], 0);
+  }
+  for (int i = 0; i < 4; ++i) {
+    cfg_.ch[i] = ch[i];
+    sent_us_[i] = -1;  // force the first write on the new channel
+  }
+  next_write_us_ = 0;
+}
+
+void Servos::setUsPerDeg(const float upd[4]) {
+  for (int i = 0; i < 4; ++i) cfg_.us_per_deg[i] = upd[i];
+}
+
 float Servos::deflToUs(int fin, float d_deg) const {
   if (fin < 0 || fin > 3) return 0;
   return linkage::deflToUs(lcal_[fin], d_deg);
@@ -117,6 +138,16 @@ void Servos::center() {
                        // ARMED start from true chip centers, whatever a
                        // bench $ang left on a canard channel
   }
+}
+
+void Servos::setGuard(float min_us, float max_us) {
+  if (min_us < SERVO_GUARD_MIN_US) min_us = SERVO_GUARD_MIN_US;
+  if (max_us > SERVO_GUARD_MAX_US) max_us = SERVO_GUARD_MAX_US;
+  if (max_us < min_us + 50.0f) return;  // refuse a degenerate window
+  cfg_.min_us = min_us;
+  cfg_.max_us = max_us;
+  // Pull any live target inside the new window on the next service pass.
+  for (int i = 0; i < 4; ++i) tgt_us_[i] = clampUs(tgt_us_[i]);
 }
 
 void Servos::off() {

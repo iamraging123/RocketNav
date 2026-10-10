@@ -182,6 +182,28 @@ void emitMsg(uint64_t us, const char *txt) {
   finishLine(p, end);
 }
 
+void emitFin(uint64_t us, const uint8_t ch[4], const int8_t dir[4],
+             const uint8_t cal[4], const float fa[4], float auth, bool saved) {
+  char *p = line_, *end = line_ + TELEM_LINE_BYTES - 2;
+  p = ap_raw(p, end, "{\"t\":\"fin\"");
+  p = ap_key(p, end, "us"); p = ap_u64(p, end, us);
+  p = ap_key(p, end, "ch"); p = ap_raw(p, end, "[");
+  for (int i = 0; i < 4; ++i) { if (i) p = ap_raw(p, end, ","); p = ap_i32(p, end, ch[i]); }
+  p = ap_raw(p, end, "]");
+  p = ap_key(p, end, "dir"); p = ap_raw(p, end, "[");
+  for (int i = 0; i < 4; ++i) { if (i) p = ap_raw(p, end, ","); p = ap_i32(p, end, dir[i]); }
+  p = ap_raw(p, end, "]");
+  p = ap_key(p, end, "cal"); p = ap_raw(p, end, "[");
+  for (int i = 0; i < 4; ++i) { if (i) p = ap_raw(p, end, ","); p = ap_i32(p, end, cal[i]); }
+  p = ap_raw(p, end, "]");
+  p = ap_key(p, end, "fa"); p = ap_raw(p, end, "[");
+  for (int i = 0; i < 4; ++i) { if (i) p = ap_raw(p, end, ","); p = ap_f(p, end, fa[i], 2); }
+  p = ap_raw(p, end, "]");
+  p = ap_key(p, end, "auth"); p = ap_f(p, end, auth, 2);
+  p = ap_key(p, end, "saved"); p = ap_bool01(p, end, saved);
+  finishLine(p, end);
+}
+
 void emitRaw(const char *json) {
   char *p = line_, *end = line_ + TELEM_LINE_BYTES - 2;
   p = ap_raw(p, end, json);
