@@ -467,7 +467,7 @@ refused unless IDLE or SAFE.
   and from GitHub Pages. Network used only for Esri satellite tiles and the
   site page's Google Fonts.
 - Layout: left column 3D attitude (+ STL upload) over pad-anchored satellite
-  map; right column tabs **Main | Ctrl | Comms**: readout cards, charts
+  map; right column tabs **Main | Ctrl | Fins | Comms | Log**: readout cards, charts
   (altitude, attitude, gyro, mag raw, accel dial), dense tables (Filter,
   Sensors, Health, GNSS, Device, startup log), console with typed command
   line. Ctrl tab: servo/canard/linkage-cal panels, control (arm/rate/angle/
@@ -536,7 +536,24 @@ refused unless IDLE or SAFE.
   the beacon reads 0.1 Hz instead of "—". The base's "downlink quiet"
   heartbeat now uses 25 s on RECOVERY (5 s on FLIGHT) so a 10 s beacon is
   not reported as quiet.
-- **Canard bench panel (2026-09-28)** in the Ctrl tab: the fin diagram drawn
+- **Fins tab (2026-10-09).** The fin map and the linkage calibration are one
+  panel on their own tab, because they are one bench pass on one fin. Seven
+  numbered steps run down it: 1-2 the wiring (channel, direction), 3-6 the
+  geometry (session, jog, record, store), 7 the proof (command an angle and
+  measure it). **There is now exactly ONE fin selector** - the diagram plus
+  an S0..S3 button row, both driving `S.finSel`. The two old dropdowns are
+  gone, and with them a real bug: `$("lcFin").onchange` was assigned twice,
+  the later assignment silently clobbering the shared-selection wiring, so
+  picking a fin in Linkage cal never moved the diagram. Every handler that
+  used to read a dropdown (`$cang`, `$lcal start`, the delete confirm, the
+  point list, the graph) now reads `S.finSel`.
+- **Ctrl tab is now Calibration / LEDs / System / Servos / Control / Command
+  log.** The Servos panel absorbed the whole-set and raw actions that used to
+  sit among the canard controls: Center all, Sweep, All fins ±10°
+  (`$cang test`), Pulses off, Release all (`$cang alloff`), plus inputs for
+  `$servo guard`. Per-fin actions (Release this fin, Neutral 0°, the angle
+  slider, Scan all 16) moved to the Fins tab where the selection lives.
+- **Canard bench diagram (2026-09-28)**: the fin diagram drawn
   looking FORWARD from behind (the viewpoint in which positive roll appears
   clockwise), fins at 12/3/6/9 for S0..S3, each drawn at its live `cdef`
   deflection with a wedge sized by that fin's travel, a direction arrow, and
@@ -544,7 +561,8 @@ refused unless IDLE or SAFE.
   dropdown and the linkage-cal dropdown all move together (`selectFin()`),
   which is the point of merging them - one fin, one bench pass, from wiring
   to angle. Identify pulses `$ang <ch>` 60/120/90. The map rows carry `uo`,
-  so they hide on the LoRa link where the `fin` record cannot arrive.
+  so they hide on the LoRa link where the `fin` record cannot arrive. The
+  diagram itself stays: `cdef` rides the air frame, so the fins still move.
 - **PARSE-CORE contract:** the code between `PARSE-CORE-BEGIN` and
   `PARSE-CORE-END` in script block 1 is extracted verbatim by
   `parse_test.js`. Keep the markers intact. Schema growth = extend

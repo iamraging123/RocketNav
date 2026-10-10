@@ -2072,11 +2072,12 @@ void setup() {
     }
   }
   {
+    // No stored map (a pre-v3 record has none) means the compiled defaults
+    // are in use and nothing is persisted - report that as UNSAVED rather
+    // than letting the initial flag pass defaults off as stored.
     cfgcodec::FinMap fm;
-    if (cfgstore::loadFinMap(&fm)) {
-      applyFinMap(fm);
-      fin_map_saved_ = true;
-    }
+    fin_map_saved_ = cfgstore::loadFinMap(&fm);
+    if (fin_map_saved_) applyFinMap(fm);
   }
   // Drive every fin to its calibrated 0 deg (neutral) at boot - AFTER the
   // linkage tables are loaded, so "straight" means each fin's designated

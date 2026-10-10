@@ -91,9 +91,19 @@
      velocity, so those hide while the stream is the recovery profile. */
   body.recovery .fo { display: none !important; }
   #histSlider { flex: 0 0 150px; min-width: 150px; }
-  #finWrap { display: grid; grid-template-columns: minmax(0, 170px) minmax(0, 1fr);
-    gap: 6px; align-items: start; margin-bottom: 5px; }
-  @media (max-width: 520px) { #finWrap { grid-template-columns: 1fr; } }
+  #finGrid { display: grid; grid-template-columns: minmax(0, 260px) minmax(0, 1fr);
+    gap: 12px; align-items: start; margin-bottom: 6px; }
+  @media (max-width: 760px) { #finGrid { grid-template-columns: 1fr; } }
+  #finCol1 { min-width: 0; }
+  #finCol2 { min-width: 0; }
+  .finstep { display: flex; align-items: baseline; gap: 6px; margin: 9px 0 3px;
+    border-top: 1px solid var(--line); padding-top: 6px; }
+  .finstep:first-child { margin-top: 0; border-top: 0; padding-top: 0; }
+  .finstep .n { font-weight: 700; font-size: 11px; color: var(--bad);
+    min-width: 12px; font-variant-numeric: tabular-nums; }
+  .finstep .t { font-size: 10px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--dim); }
+  .finSel.on { background: var(--text); color: var(--bg); border-color: var(--text); }
   #finMap { width: 100%; height: auto; display: block; cursor: pointer; }
   #finTbl { width: 100%; border-collapse: collapse; font-size: 10.5px; }
   #finTbl th { text-align: left; font-weight: 600; font-size: 9px; color: var(--dim);
@@ -396,6 +406,7 @@
       <button class="tab on" data-page="main">Main</button>
       <span class="spacer"></span>
       <button class="tab" data-page="ctrl">Ctrl</button>
+      <button class="tab" data-page="fins">Fins</button>
       <button class="tab" data-page="comms">Comms</button>
       <button class="tab" data-page="log">Log</button>
     </nav>
@@ -541,35 +552,10 @@
           <div class="ctlrow"><span class="k2">S1 &micro;s</span><input type="number" id="svUs1" value="1500" min="900" max="2100" step="10"><button id="svSet1" class="secondary mini">Set</button></div>
           <div class="ctlrow"><span class="k2">S2 &micro;s</span><input type="number" id="svUs2" value="1500" min="900" max="2100" step="10"><button id="svSet2" class="secondary mini">Set</button></div>
           <div class="ctlrow"><span class="k2">S3 &micro;s</span><input type="number" id="svUs3" value="1500" min="900" max="2100" step="10"><button id="svSet3" class="secondary mini">Set</button></div>
-          <div class="ctlrow"><button id="svCenter" class="secondary mini">Center</button><button id="svSweep" class="secondary mini">Sweep 6 s</button><button id="svOff" class="secondary mini">Pulses off</button></div>
-        </div>
-        <div class="panel">
-          <h2>Canard bench</h2>
-          <div id="finWrap">
-            <svg id="finMap" viewBox="0 0 150 150" role="img" aria-label="Canard layout seen from behind; click a fin to select it"></svg>
-            <div>
-              <table id="finTbl"><thead><tr><th>fin</th><th>ch</th><th>dir</th><th>tbl</th><th>&plusmn;&deg;</th></tr></thead><tbody id="finBody"></tbody></table>
-              <div class="ctlrow uo" style="margin-top:4px"><span class="k2">ch</span><button class="secondary mini finCh" data-c="0">0</button><button class="secondary mini finCh" data-c="1">1</button><button class="secondary mini finCh" data-c="2">2</button><button class="secondary mini finCh" data-c="3">3</button><button id="finIdent" class="secondary mini" title="Wiggle this fin's PCA channel so you can see which fin moves.">Identify</button></div>
-              <div class="ctlrow uo"><span class="k2">+&micro;s</span><button id="finCw" class="secondary mini">cw</button><button id="finCcw" class="secondary mini">ccw</button><button id="finSave" class="secondary mini" title="Persist the fin map to flash (freezes the board ~2 s).">Save map</button><button id="finReset" class="secondary mini">Defaults</button></div>
-            </div>
-          </div>
-          <div class="ctlrow"><span class="ro" id="finNote" style="color:var(--dim);font-size:10.5px">&mdash;</span></div>
-          <div class="ctlrow"><span class="k2">canard</span><select id="angCh"></select><input type="number" id="angVal" value="0" min="-25" max="25" step="1"><span class="k2" style="min-width:0">&deg;</span><button id="angSet" class="secondary mini">Set</button></div>
-          <div class="ctlrow"><input type="range" id="angSlide" min="-25" max="25" step="1" value="0"></div>
-          <div class="ctlrow"><button id="angCenter" class="secondary mini" title="Command 0&deg; canard = calibrated neutral (fin straight). Calibrate the fin first in Linkage cal.">Neutral 0&deg;</button><button id="angTest" class="secondary mini" title="All four fins: +10&deg; then -10&deg; then 0&deg; (calibrated). Watch each fin move.">Test all fins</button><button id="angRel" class="secondary mini">Release</button><button id="angAllOff" class="secondary mini">All off</button><button id="angScan" class="secondary mini" title="Wiggles every PCA channel in turn (~19 s). Watch which servo moves on which console announcement to learn its real channel.">Scan 16 ch</button></div>
-          <div class="ctlrow"><span class="ro" style="color:var(--dim);font-size:11px">true canard degrees via linkage cal &middot; 0&deg; = neutral. Calibrate first or 0&deg; is just the raw servo center.</span></div>
-        </div>
-        <div class="panel uo">
-          <h2>Linkage cal &middot; selected fin</h2>
-          <div class="ctlrow"><span class="k2">fin</span><select id="lcFin"><option value="0">S0</option><option value="1">S1</option><option value="2">S2</option><option value="3">S3</option></select><button id="lcStart" class="secondary mini">Start</button><button id="lcAbort" class="secondary mini">End</button></div>
-          <div class="ctlrow"><span class="k2">jog &micro;s</span><button id="lcJm50" class="secondary mini">-50</button><button id="lcJm10" class="secondary mini">-10</button><button id="lcJp10" class="secondary mini">+10</button><button id="lcJp50" class="secondary mini">+50</button></div>
-          <div class="ctlrow"><button id="lcCenter" class="secondary mini" title="Record the current pulse as canard 0&deg; (jog until flush against a straightedge first).">Mark center 0&deg;</button><input type="number" id="lcDeg" value="0" step="0.5" title="Measured canard angle (phone inclinometer) at the current pulse."><button id="lcPoint" class="secondary mini">Save point</button><button id="lcUndo" class="secondary mini">Undo</button></div>
-          <div class="ctlrow"><button id="lcSave" class="secondary">Save to flash</button><button id="lcShow" class="secondary mini">Show</button><button id="lcClear" class="secondary mini">Delete all points</button></div>
-          <div class="ctlrow"><span class="k2">check &deg;</span><button class="secondary mini lcChk" data-d="-10">-10</button><button class="secondary mini lcChk" data-d="-5">-5</button><button class="secondary mini lcChk" data-d="0">0</button><button class="secondary mini lcChk" data-d="5">+5</button><button class="secondary mini lcChk" data-d="10">+10</button></div>
-          <div class="ctlrow"><button id="lcLoad" class="secondary mini" title="Copy the fin's active table into the staged points for editing.">Load table</button><button id="lcDump" class="secondary mini" title="Re-request the tables from the rocket.">Refresh</button><button id="lcFlash" class="secondary mini" title="Report what is physically stored in flash right now (run after a power cycle to confirm a save persisted).">Flash check</button></div>
-          <div id="lcPoints" class="lcpts"></div>
-          <canvas id="lcGraph"></canvas>
-          <div class="ctlrow"><span class="ro" style="color:var(--dim);font-size:11px">Offset-only: Start, jog flush, Mark center, Save (keeps default gain). Full curve: also add limit + midpoint measured points before Save. Then check &plusmn;5/&plusmn;10.</span></div>
+          <div class="ctlrow"><span class="k2">guard &micro;s</span><input type="number" id="svGuardLo" value="900" min="900" max="2100" step="10" title="Lowest pulse any command may reach."><input type="number" id="svGuardHi" value="2100" min="900" max="2100" step="10" title="Highest pulse any command may reach."><button id="svGuardSet" class="secondary mini" title="$servo guard — clamp every raw, calibrated and controller command to the measured travel of the fitted servos. Not persisted.">Apply</button></div>
+          <div class="ctlrow"><button id="svCenter" class="secondary mini" title="$servo center — drive all four to their calibrated neutral.">Center all</button><button id="svSweep" class="secondary mini" title="$servo sweep — 6 s slow sweep of all four, to watch for binding.">Sweep 6 s</button><button id="angTest" class="secondary mini" title="$cang test — all four to +10&deg;, then -10&deg;, then 0&deg; in calibrated degrees.">All fins &plusmn;10&deg;</button></div>
+          <div class="ctlrow"><button id="svOff" class="secondary mini" title="$servo off — stop the pulses, servos go limp and stop drawing current.">Pulses off</button><button id="angAllOff" class="secondary mini" title="$cang alloff — release all four canard channels.">Release all</button></div>
+          <div class="ctlrow"><span class="ro" style="color:var(--dim);font-size:11px">Raw pulses and whole-set actions. Per-fin mapping and angle calibration live in the <b>Fins</b> tab.</span></div>
         </div>
         <div class="panel">
           <h2>Control</h2>
@@ -588,6 +574,43 @@
       </div>
     </section>
 
+    <section class="page" id="pg-fins">
+      <div class="panel">
+        <h2>Canard fins &middot; map and angle calibration</h2>
+        <div id="finGrid">
+          <div id="finCol1">
+            <svg id="finMap" viewBox="0 0 150 150" role="img" aria-label="Canard layout seen from behind; click a fin to select it"></svg>
+            <div class="ctlrow" style="justify-content:center"><button class="secondary mini finSel" data-f="0">S0</button><button class="secondary mini finSel" data-f="1">S1</button><button class="secondary mini finSel" data-f="2">S2</button><button class="secondary mini finSel" data-f="3">S3</button></div>
+            <table id="finTbl"><thead><tr><th>fin</th><th>ch</th><th>dir</th><th>tbl</th><th>&plusmn;&deg;</th></tr></thead><tbody id="finBody"></tbody></table>
+            <div class="ctlrow"><span class="ro" id="finNote" style="color:var(--dim);font-size:10.5px">&mdash;</span></div>
+          </div>
+          <div id="finCol2">
+            <div class="finstep uo"><span class="n">1</span><span class="t">Which servo drives this fin</span></div>
+            <div class="ctlrow uo"><span class="k2">channel</span><button class="secondary mini finCh" data-c="0">0</button><button class="secondary mini finCh" data-c="1">1</button><button class="secondary mini finCh" data-c="2">2</button><button class="secondary mini finCh" data-c="3">3</button><button id="finIdent" class="secondary mini" title="Twitches the selected fin's channel 60&deg;-120&deg;-90&deg;. If a different fin moves, press the channel it really is.">Twitch it</button><button id="angScan" class="secondary mini" title="$ang scan — wiggles all 16 PCA channels in turn over ~19 s, announcing each one in the console.">Scan all 16</button></div>
+            <div class="finstep uo"><span class="n">2</span><span class="t">Which way it swings for a rising pulse</span></div>
+            <div class="ctlrow uo"><span class="k2">leading edge</span><button id="finCw" class="secondary mini" title="A positive canard degree swings this fin's leading edge CLOCKWISE seen from behind, which is the positive roll sense.">clockwise</button><button id="finCcw" class="secondary mini" title="A positive canard degree swings this fin's leading edge COUNTER-clockwise seen from behind.">counter-cw</button><button id="finSave" class="secondary mini" title="$fin save — persist the whole map to flash. Freezes the board ~2 s.">Save map</button><button id="finReset" class="secondary mini" title="$fin reset — back to the channels and directions compiled into the firmware.">Defaults</button></div>
+
+            <div class="finstep"><span class="n">3</span><span class="t">Open a calibration session on this fin</span></div>
+            <div class="ctlrow"><button id="lcStart" class="secondary mini" title="$lcal start — takes this fin to its current 0&deg; and begins staging measured points.">Start</button><button id="lcAbort" class="secondary mini" title="$lcal abort — end the session and recentre, discarding anything staged.">End session</button><button id="angRel" class="secondary mini" title="$cang &lt;fin&gt; off — release just this fin so you can move it by hand.">Release this fin</button></div>
+            <div class="finstep"><span class="n">4</span><span class="t">Jog the servo to a known angle</span></div>
+            <div class="ctlrow"><span class="k2">jog &micro;s</span><button id="lcJm50" class="secondary mini">-50</button><button id="lcJm10" class="secondary mini">-10</button><button id="lcJp10" class="secondary mini">+10</button><button id="lcJp50" class="secondary mini">+50</button></div>
+            <div class="finstep"><span class="n">5</span><span class="t">Record where it is now</span></div>
+            <div class="ctlrow"><button id="lcCenter" class="secondary" title="$lcal point 0 — records the current pulse as canard 0&deg;. Jog until the fin is flush against a straightedge first.">Fin is flush = 0&deg;</button></div>
+            <div class="ctlrow"><span class="k2">or it is</span><input type="number" id="lcDeg" value="10" step="0.5" title="Measured canard angle at the current pulse, from a protractor or phone inclinometer."><span class="k2" style="min-width:0">&deg;</span><button id="lcPoint" class="secondary mini" title="$lcal point — stage this (angle, pulse) pair. Up to 5; the outermost two become the mechanical limits.">Record point</button><button id="lcUndo" class="secondary mini" title="$lcal undo — drop the last staged point.">Undo last</button></div>
+            <div class="finstep"><span class="n">6</span><span class="t">Store the table</span></div>
+            <div class="ctlrow"><button id="lcSave" class="secondary" title="$lcal save — write the staged points to flash as this fin's table. Freezes the board ~2 s.">Save to flash</button><button id="lcLoad" class="secondary mini" title="$lcal load — copy the fin's stored table back into the staged points so you can edit it.">Load table</button><button id="lcClear" class="secondary mini">Delete all points</button></div>
+            <div class="finstep"><span class="n">7</span><span class="t">Check it against the real fin</span></div>
+            <div class="ctlrow"><span class="k2">command &deg;</span><button class="secondary mini lcChk" data-d="-10">-10</button><button class="secondary mini lcChk" data-d="-5">-5</button><button class="secondary mini lcChk" data-d="0">0</button><button class="secondary mini lcChk" data-d="5">+5</button><button class="secondary mini lcChk" data-d="10">+10</button></div>
+            <div class="ctlrow"><span class="k2">free set</span><input type="number" id="angVal" value="0" min="-25" max="25" step="1"><span class="k2" style="min-width:0">&deg;</span><button id="angSet" class="secondary mini" title="$cang — command this fin to a true canard angle through its table.">Set</button><button id="angCenter" class="secondary mini" title="Command 0&deg;: the calibrated neutral. Uncalibrated, this is just the raw servo centre.">Neutral 0&deg;</button></div>
+            <div class="ctlrow"><input type="range" id="angSlide" min="-25" max="25" step="1" value="0"></div>
+            <div class="ctlrow"><button id="lcShow" class="secondary mini" title="$lcal show — print the staged points to the console.">Show staged</button><button id="lcDump" class="secondary mini" title="$lcal dump — re-request every fin's table from the rocket.">Refresh all</button><button id="lcFlash" class="secondary mini" title="$lcal flash — report what is PHYSICALLY in the flash sector. Run after a power cycle to prove a save persisted.">Flash check</button></div>
+          </div>
+        </div>
+        <div id="lcPoints" class="lcpts"></div>
+        <canvas id="lcGraph"></canvas>
+        <div class="ctlrow"><span class="ro" style="color:var(--dim);font-size:11px">Steps 1 and 2 are the wiring, 3 to 6 the geometry, 7 the proof. <b>Quick zero:</b> Start, jog flush, "Fin is flush", Save &mdash; keeps the default gain and fixes only the neutral. <b>Full curve:</b> also record each mechanical limit before saving; the outermost points become the travel limits and the smallest of the four sets the controller's authority.</span></div>
+      </div>
+    </section>
     <section class="page" id="pg-comms">
       <div class="charts">
         <canvas class="chart" id="chRate"></canvas>
@@ -2172,9 +2195,14 @@ function renderFinMap() {
 // One selection drives the diagram, the canard-angle box and the lcal box.
 function selectFin(i) {
   S.finSel = i;
-  const a = $("angCh"), l = $("lcFin");
-  if (a) a.value = String(i);
-  if (l) l.value = String(i);
+  [].forEach.call(document.querySelectorAll("button.finSel"), b => {
+    b.classList.toggle("on", +b.dataset.f === i);
+  });
+  // One selection for the whole tab: the diagram, the map controls and the
+  // calibration session all act on this fin. Changing it drops any pending
+  // delete confirmation and redraws the point list and graph for the new fin.
+  if (typeof lcClearReset === "function") lcClearReset();
+  if (typeof renderLcalPoints === "function") renderLcalPoints();
   S.finDirty = true;
   renderFinMap();
 }
@@ -2624,7 +2652,7 @@ updateDevice();
   for (const b of tabs) b.onclick = () => show(b.dataset.page);
   let t = null;
   try { t = localStorage.getItem("rnTab"); } catch (e) {}
-  show(["main", "ctrl", "comms", "log"].includes(t) ? t : "main");
+  show(["main", "ctrl", "fins", "comms", "log"].includes(t) ? t : "main");
 })();
 
 /* ================= ground commands ================= */
@@ -2670,14 +2698,17 @@ function sendPing() {
   sendCmd("$ping");
 }
 $("cmdPing").onclick = sendPing;
-if ($("angCh")) $("angCh").onchange = () => selectFin(+$("angCh").value || 0);
-if ($("lcFin")) $("lcFin").onchange = () => selectFin(+$("lcFin").value || 0);
+[].forEach.call(document.querySelectorAll("button.finSel"), b => {
+  b.onclick = () => selectFin(+b.dataset.f);
+});
 $("lbPing").onclick = sendPing;
 $("lbUnmute").onclick = () => sendCmd("$lora 1");
 $("lbMute").onclick = () => sendCmd("$lora 0");
 $("lbLoraQ").onclick = () => sendCmd("$lora?");
 $("lbBaseQ").onclick = () => sendCmd("$base?");
 $("lbRec").onclick = () => sendCmd("$lora rec");
+$("svGuardSet").onclick = () =>
+    sendCmd("$servo guard " + $("svGuardLo").value + " " + $("svGuardHi").value);
 [].forEach.call(document.querySelectorAll("button.finCh"), b => {
   b.onclick = () => {
     const d = (S.fin && S.fin.dir) ? S.fin.dir[S.finSel] : 1;
@@ -2733,19 +2764,10 @@ $("cmdLoraUn").onclick = () => sendCmd("$lora 1");
 for (let i = 0; i < 4; i++) {
   $("svSet" + i).onclick = () => sendCmd(`$servo ${i} ${$("svUs" + i).value}`);
 }
-{
-  const sel = $("angCh");
-  for (let i = 0; i < 4; i++) {
-    const o = document.createElement("option");
-    o.value = i;
-    o.textContent = "S" + i;
-    sel.appendChild(o);
-  }
-}
 /* Canard angle in TRUE degrees via the linkage cal (0 = calibrated
    neutral). Slider previews the number live and sends ONCE on release so a
    drag doesn't flood the console; $ang (raw servo) stays for console use. */
-const sendAng = d => sendCmd(`$cang ${$("angCh").value} ${d}`);
+const sendAng = d => sendCmd(`$cang ${S.finSel} ${d}`);
 $("angSet").onclick = () => sendAng($("angVal").value);
 $("angSlide").oninput = () => { $("angVal").value = $("angSlide").value; };
 $("angSlide").onchange = () => sendAng($("angSlide").value);
@@ -2756,10 +2778,10 @@ $("angCenter").onclick = () => {
   sendAng(0);
 };
 $("angTest").onclick = () => sendCmd("$cang test");
-$("angRel").onclick = () => sendCmd(`$cang ${$("angCh").value} off`);
+$("angRel").onclick = () => sendCmd(`$cang ${S.finSel} off`);
 $("angAllOff").onclick = () => sendCmd("$cang alloff");
 $("angScan").onclick = () => sendCmd("$ang scan");
-$("lcStart").onclick = () => sendCmd(`$lcal start ${$("lcFin").value}`);
+$("lcStart").onclick = () => sendCmd(`$lcal start ${S.finSel}`);
 $("lcAbort").onclick = () => sendCmd("$lcal abort");
 $("lcJm50").onclick = () => sendCmd("$lcal jog -50");
 $("lcJm10").onclick = () => sendCmd("$lcal jog -10");
@@ -2777,7 +2799,7 @@ const lcClearReset = () => {
   $("lcClear").classList.remove("armred");
 };
 $("lcClear").onclick = () => {
-  const w = performance.now(), fin = +$("lcFin").value;
+  const w = performance.now(), fin = S.finSel;
   if (w - lcClearArm < 3000 && fin === lcClearFin) {
     sendCmd(`$lcal clear ${lcClearFin}`);
     lcClearReset();
@@ -2805,7 +2827,6 @@ $("lcPoints").onclick = e => {
     sendCmd(`$lcal edit ${b.dataset.i} ${$("lcDeg").value}`);
   }
 };
-$("lcFin").onchange = () => { lcClearReset(); renderLcalPoints(); };
 
 /* Point list: staged session points are editable (edit takes the measured-
    degree box value); an active table is read-only until Load pulls it into
@@ -2813,7 +2834,7 @@ $("lcFin").onchange = () => { lcClearReset(); renderLcalPoints(); };
 function renderLcalPoints() {
   const box = $("lcPoints");
   if (!box) return;
-  const fin = parseInt($("lcFin").value, 10);
+  const fin = S.finSel;
   const st = (S.lcal.stage && S.lcal.stage.fin === fin) ? S.lcal.stage : null;
   let h = "";
   if (st) {
@@ -2858,7 +2879,7 @@ function drawLcalGraph() {
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   const W = c.clientWidth, H = c.clientHeight;
   g.clearRect(0, 0, W, H);
-  const fin = parseInt($("lcFin").value, 10);
+  const fin = S.finSel;
   const act = S.lcal.fins[fin];
   const st = (S.lcal.stage && S.lcal.stage.fin === fin) ? S.lcal.stage : null;
   const DMIN = -25, DMAX = 25, UMIN = 900, UMAX = 2100;
